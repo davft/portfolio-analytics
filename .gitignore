@@ -14,6 +14,7 @@ __pycache__/
 .ipynb_checkpoints/
 source/
 src/ch7/data/
+prova/
 
 # C extensions
 *.so
