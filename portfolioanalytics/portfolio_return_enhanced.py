@@ -2,7 +2,8 @@
 import pandas as pd
 import numpy as np
 import warnings
-import prova.functions as pa
+# https://stackoverflow.com/questions/16004076/python-importing-a-module-that-imports-a-module
+from . import functions as pa
 
 
 class Portfolio(object):
@@ -46,9 +47,11 @@ class Portfolio(object):
     def check_weights(self, weights):
 
         if self.leverage is not None:
-            if any(weights.sum(axis=1) > self.leverage):
+            tol = 1e-06
+            if any(weights.sum(axis=1) > self.leverage + tol):
                 warnings.warn("sum of weights exceed leverage value of {} in dates {}:\nrebasing to {}".format(
                     self.leverage, weights[weights.sum(axis=1) > self.leverage].index.values, self.leverage))
+                # ribasa i pesi per le date in cui superano leverage + tolleranza
                 weights[weights.sum(axis=1) > self.leverage] = weights[weights.sum(axis=1) > self.leverage].apply(
                     lambda x: x / sum(x) * self.leverage, axis=1
                 )
@@ -189,14 +192,6 @@ class Portfolio(object):
 
         self.ptf_ret = ptf_ret
         self.ptf_ts = ptf
-
-        # calcola il turnover
-        turnover = V_bop.shift(-1).subtract(V)
-        turnover = turnover.loc[weights.index]
-        turnover = turnover.apply(lambda x: np.sum(np.abs(x)), axis=1).divide(ptf.loc[weights.index])
-        # secondo la definizione di cui sopra, il massimo turnover è 2. se modifichiamo l'allocazione dell'intero
-        # ptf vogliamo turnover=1
-        turnover = turnover / 2
 
         if verbose:
             # compute components' contributions in each day via

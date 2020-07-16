@@ -54,9 +54,9 @@ def compute_excess_return(ts, bmk_ts):
         return
 
     if isinstance(ts, pd.Series):
-        excess_return = ts.subtract(bmk_ts)
+        excess_return = ts.subtract(bmk_ts.loc[ts.index])
     elif isinstance(ts, pd.DataFrame):
-        excess_return = ts.apply(lambda x: x.subtract(bmk_ts), axis=0)
+        excess_return = ts.apply(lambda x: x.subtract(bmk_ts.loc[ts.index]), axis=0)
 
     excess_return = excess_return.dropna()
     return excess_return
@@ -89,7 +89,7 @@ def get_years_past(series):
     start_date = series.index[0]
     end_date = series.index[-1]
 
-    return (end_date - start_date).days / 365.25
+    return ((end_date - start_date).days + 1) / 365.25
 
 
 def compute_cagr(prices):
