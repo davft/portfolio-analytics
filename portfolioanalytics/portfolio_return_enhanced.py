@@ -46,6 +46,10 @@ class Portfolio(object):
 
     def check_weights(self, weights):
 
+        if isinstance(weights, (list, np.ndarray)):
+            # assume buy & hold portfolio with specified weights
+            weights = pd.DataFrame([weights], index=[self.prices.index[0]], columns=self.prices.columns)
+
         if self.leverage is not None:
             tol = 1e-06
             if any(weights.sum(axis=1) > self.leverage + tol):
@@ -78,12 +82,12 @@ class Portfolio(object):
             v_init = v_init.values.tolist()
         else:
             raise ValueError("v_init should be either pd.Series or pd.DataFrame")
-
+        
         components_value = pd.DataFrame(v_init * ret.shape[0], index=ret.index, columns=ret.columns)
         if self.method == "simple":
-            components_value = ret.apply(lambda x: np.cumprod(1 + x), axis=0) * components_value
+            components_value = components_value * ret.apply(lambda x: np.cumprod(1 + x), axis=0)
         elif self.method == "log":
-            components_value = ret.apply(lambda x: np.cumsum(x), axis=0) * components_value
+            components_value = components_value * ret.apply(lambda x: np.cumsum(x), axis=0)
         else:
             raise ValueError("method should be either simple or log")
 
@@ -118,8 +122,8 @@ class Portfolio(object):
         if weights is None:
             weights = self.weights
         else:
-            assert isinstance(weights, pd.DataFrame)
             weights = self.check_weights(weights)
+            assert isinstance(weights, pd.DataFrame)
             self.weights = weights
 
         if "residual" in weights.columns:
@@ -158,6 +162,10 @@ class Portfolio(object):
             # we need to remove the first return, since rebalancing happens from the day after
             # the actual index indicated in the weights input
             tmp_ret = tmp_ret.drop(index=weights.index[t])
+            # metti i ritorni mancanti a zero, altrimenti ci sono "buchi" nel ptf.
+            # esempio: se V0 = 100 e w1 = 10%, ma la stock 1 non ha ritorni in quel periodo, il ptf in t0 sommerà a 90 e
+            # non a 100
+            tmp_ret = tmp_ret.fillna(0)
             # cumulate returns components inside this interval, i.e. in
             # (index[t] + 1, index[t+1]]
             tmp_value = self.get_components_value_single_period(tmp_ret, v_bop)

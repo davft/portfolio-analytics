@@ -39,6 +39,89 @@ def compute_returns(prices, method="simple"):
     return returns
 
 
+def compute_ts(returns, method="simple", V0=100):
+    """
+    compute time series given a pd.Series or a pd.Dataframe containing returns (simple or log)
+    compute prices time series of `returns`.
+    NB: first row of `returns` is assumed to be 0.
+    :param returns: pd.Series or pd.DataFrame
+    :param method: "simple" or "log"
+    :param V0: int, starting value
+    :return: prices time series
+    """
+
+    if method == "simple":
+        ts_fun = lambda x: V0 * np.cumprod(1 + x)
+    elif method == "log":
+        ts_fun = lambda x: V0 * np.exp(np.cumsum(returns))
+    else:
+        raise ValueError("method should be either simple or log")
+
+    if isinstance(returns, pd.Series):
+        prices = ts_fun(returns)
+    elif isinstance(returns, pd.DataFrame):
+        prices = returns.apply(ts_fun, axis=0)
+    else:
+        raise TypeError("price_series should be either pd.Series or pd.DataFrame")
+
+    return prices
+
+
+def bootstrap_ts(ret, samples, index_dates=None):
+    """
+
+    :param ret: pd.Series containing returns
+    :param samples: int, tuple or np.array. if 2d np.array, then each col contains different bootstrap.
+        if 1d np.array, then single bootstrap. if int, then perform bootstrap of lenght samples.
+        if tuple of lenght 2, then use it as the size of np.random.choice
+    :param index_dates: None or list/pd.Index of dates of length the number of extractions in each bootstrap
+    :return: pd.Series or pd.DataFrame with bootstrapped returns. pd.DataFrame if samples is 2d np.array
+    """
+
+    assert isinstance(ret, pd.Series)
+    if isinstance(samples, np.ndarray):
+        if samples.ndim == 1:
+            # 1d array
+            sim_ret = ret.iloc[samples].reset_index(drop=True)
+        else:
+            # 2d array
+            sim_ret = []
+            for i in range(samples.shape[1]):
+                sim_ret_i = ret.iloc[samples[:, i]].reset_index(drop=True)
+                sim_ret.append(sim_ret_i)
+            sim_ret = pd.concat(sim_ret, axis=1)
+    elif isinstance(samples, (int, float)):
+        samples = np.random.choice(range(len(ret)), size=samples)
+        return bootstrap_ts(ret, samples=samples, index_dates=index_dates)
+    elif isinstance(samples, tuple):
+        # nel caso in cui venga passata una tupla più lunga di due, prendi solo i primi due elementi
+        samples = np.random.choice(range(len(ret)), size=samples[0:2])
+        return bootstrap_ts(ret, samples=samples, index_dates=index_dates)
+    else:
+        raise Exception(f"samples must be int or np.array")
+
+    # add zeros as first obs to compute prices time series easly later
+    if isinstance(sim_ret, pd.Series):
+        sim_ret = pd.concat([pd.Series(0), sim_ret])
+    elif isinstance(sim_ret, pd.DataFrame):
+        sim_ret = pd.concat([pd.DataFrame(0, index=[0], columns=sim_ret.columns), sim_ret], axis=0)
+    else:
+        print("something went wrong")
+
+    if index_dates is not None:
+        if isinstance(index_dates, (list, pd.DatetimeIndex)):
+            if len(index_dates) == len(sim_ret):
+                sim_ret.index = index_dates
+            else:
+                print(f"`index_dates` must be of lenght {len(sim_ret)}")
+                print(f"Dates not added as index")
+        else:
+            print(f"`index_dates` must be `list` or `pd.DatetimeIndex`, got {type(index_dates)} instead")
+            print(f"Dates not added as index")
+
+    return sim_ret
+
+
 def compute_excess_return(ts, bmk_ts):
     """
     compute excess return. ts and bmk_ts should have the same dates, otherwise inner join
@@ -424,13 +507,13 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
     return replica
 
 
-def compute_groupby_difference(hldg, bmk_hldg, groupby=[], verbose=False):
+def compute_groupby_difference(hldg, bmk_hldg, groupby=[]):
     """
     compute difference between aggregation of ptf vs index
     :param hldg: pd.DataFrame with portfolio composition [only one ptf per call]
     :param bmk_hldg: pd.DataFrame with benchmark composition
     :param groupby: list of keys to groupby
-    :param verbose: boolean, if True return tuples (diff, ptf_exp, bmk_exp)
+    # :param verbose: boolean, if True return tuples (diff, ptf_exp, bmk_exp)
     """
     if not isinstance(hldg, pd.DataFrame):
         print("`hldg` must be a pd.DataFrame containing portfolio compositions")
@@ -444,6 +527,12 @@ def compute_groupby_difference(hldg, bmk_hldg, groupby=[], verbose=False):
     if isinstance(groupby, str):
         groupby = [groupby]
 
+        # columns to lowercase
+    hldg.columns = hldg.columns.map(lambda x: x.lower())
+    bmk_hldg.columns = bmk_hldg.columns.map(lambda x: x.lower())
+    groupby = list(map(lambda x: x.lower(), groupby))
+
+
     # group by `groupby` and compute allocation weights
     fun_exposure = lambda x: x["w"].sum()
     ptf_exposure = hldg.groupby(groupby).apply(fun_exposure)
@@ -455,7 +544,4 @@ def compute_groupby_difference(hldg, bmk_hldg, groupby=[], verbose=False):
     diff = diff.fillna(0)
     diff["difference"] = diff["ptf_exp"] - diff["bmk_exp"]
 
-    if verbose:
-        return diff["difference"], ptf_exposure, bmk_exposure
-    else:
-        return diff["difference"]
+    return diff
