@@ -83,7 +83,7 @@ class Portfolio(object):
         else:
             raise ValueError("v_init should be either pd.Series or pd.DataFrame")
         
-        components_value = pd.DataFrame(v_init * ret.shape[0], index=ret.index, columns=ret.columns)
+        components_value = pd.DataFrame(v_init * len(ret), index=ret.index, columns=ret.columns)
         if self.method == "simple":
             components_value = components_value * ret.apply(lambda x: np.cumprod(1 + x), axis=0)
         elif self.method == "log":
@@ -218,6 +218,23 @@ class Portfolio(object):
             return ptf_ret, ptf, contrib, turnover, V, V_bop
 
         return ptf_ret, ptf
+    
+    def get_last_eop_weights(self, weights=None):
+        """
+        
+        :param weights: 
+        :return: 
+        """
+        _, ts, _, _, V_eop, _ = self.portfolio_returns(weights=weights, verbose=True)
+        # compute end of period weights dividing the end of period value of each stock by the eop ptf value
+        w_eop = V_eop.divide(ts, axis=0)
+        # get last w_eop: il peso delle stock all'ultima data di prices
+        # https://www.shanelynn.ie/select-pandas-dataframe-rows-and-columns-using-iloc-loc-and-ix/
+        last_w_eop = w_eop.iloc[[-1]]
+
+        return last_w_eop
+        
+        
 
 # #
 # # prices = {
