@@ -339,11 +339,13 @@ def compute_historical_var(returns, conf_lvl=.95):
 
 def compute_rolling_corr(ts, df=None, window=252):
     """
-    compute rolling correlations. if ts is pd.Series, then it computes `ts` vs all `df` cols
-    if `ts` is pd.DataFrame, then it computes all pairwise corr between `ts` cols
+    compute rolling correlations. if `ts` is pd.Series, then it computes `ts` vs all `df` cols
+    if `ts` is pd.DataFrame and `df` is None, then it computes all pairwise corr between `ts` cols
+    if `ts` is pd.DataFrame and `df` is pd.Series, then it computes all `ts` vs `df`
     :param ts: pd.Series or pd.DataFrame
         if pd.Series, then `df` is mandatory and must be pd.Series or pd.DataFrame
-        if pd.DataFrame, then `df` is not needed and all pairwise correlations are computed
+        if pd.DataFrame and `df` is not given, then all pairwise correlations are computed
+        if pd.DataFrame and `df` is pd.Series, then all correlation btw `ts` and `df` are computed
     :param df: None or pd.Series, pd.DataFrame
     :param window: int, rolling window
     """
@@ -361,16 +363,67 @@ def compute_rolling_corr(ts, df=None, window=252):
             corr.columns = [ts.name + "-" + col for col in corr.columns]
 
     if isinstance(ts, pd.DataFrame):
-        corr = list()
-        for i in range(len(ts.columns) - 1):
-            for j in range(i + 1, len(ts.columns)):
-                pair_corr = ts[ts.columns[i]].rolling(window).corr(ts[ts.columns[j]]).to_frame()
-                pair_corr.columns = [ts.columns[i] + "-" + ts.columns[j]]
+        if df is None:
+            corr = list()
+            for i in range(len(ts.columns) - 1):
+                for j in range(i + 1, len(ts.columns)):
+                    pair_corr = ts[ts.columns[i]].rolling(window).corr(ts[ts.columns[j]]).to_frame()
+                    pair_corr.columns = [ts.columns[i] + "-" + ts.columns[j]]
+                    corr.append(pair_corr)
+
+            corr = pd.concat(corr, axis=1)
+        elif isinstance(df, pd.Series):
+            corr = list()
+            for i in range(len(ts.columns) - 1):
+                pair_corr = ts[ts.columns[i]].rolling(window).corr(df).to_frame()
+                pair_corr.columns = [ts.columns[i] + "-" + df.name]
                 corr.append(pair_corr)
 
-        corr = pd.concat(corr, axis=1)
+            corr = pd.concat(corr, axis=1)
 
     corr = corr.dropna()
+    return corr
+
+
+def compute_corr(ts, df=None):
+    """
+    computes correlation over all given period
+    if `ts` is pd.Series, then it computes `ts` vs all `df` cols
+    if `ts` is pd.DataFrame and `df` is None, then it computes all pairwise corr between `ts` cols
+    if `ts` is pd.DataFrame and `df` is pd.Series, then it computes all `ts` vs `df`
+    :param ts: pd.Series or pd.DataFrame
+        if pd.Series, then `df` is mandatory and must be pd.Series or pd.DataFrame
+        if pd.DataFrame and `df` is not given, then all pairwise correlations are computed
+        if pd.DataFrame and `df` is pd.Series, then all correlation btw `ts` and `df` are computed
+    :param df: None or pd.Series, pd.DataFrame
+    """
+
+    if isinstance(ts, pd.Series) and df is None:
+        print("please provide argument `df` (can't be None if `ts` is pd.Series)")
+        return
+
+    if isinstance(ts, pd.Series):
+        if isinstance(df, pd.Series):
+            # output: float
+            corr = ts.corr(df)
+            # corr.columns = [ts.name + "-" + df.name]
+        elif isinstance(df, pd.DataFrame):
+            # output: pd.Series
+            corr = df.apply(lambda x: x.corr(ts), axis=0).reset_index(name="corr")
+            # corr.columns = [ts.name + "-" + col for col in corr.columns]
+
+    if isinstance(ts, pd.DataFrame):
+        if df is None:
+            corr = pd.DataFrame(0, index=ts.columns, columns=ts.columns)
+            for i in range(len(ts.columns)):
+                for j in range(i, len(ts.columns)):
+                    corr.iloc[i, j] = ts[ts.columns[i]].corr(ts[ts.columns[j]])
+                    # it's the same
+                    corr.iloc[j, i] = corr.iloc[i, j]
+
+        elif isinstance(df, pd.Series):
+            corr = ts.apply(lambda x: x.corr(df), axis=0).reset_index(name="corr")
+
     return corr
 
 
@@ -421,7 +474,7 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
     # select groupby cells up to `overall_coverage`
     cells = cut_coverage(stat, col="cumulative_sum", lvl=overall_coverage)
     cells = cells.copy()
-    print("Selecting first {} out of {} combinations of {}".format(cells.shape[0], stat.shape[0], groupby))
+    print(f"Selecting first {len(cells)} out of {len(stat)} combinations of {groupby}")
 
     # rebase weight to 1 on selected cells
     cells["w_rebase"] = cells["w"] / cells["w"].sum()
