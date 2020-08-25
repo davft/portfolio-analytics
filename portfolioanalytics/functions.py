@@ -11,7 +11,29 @@ def rebase_ts(prices, level=100):
     :param prices: pd.Series or pd.DataFrame
     :param level: rebase to level
     """
-    return prices / prices.iloc[0] * level
+
+    if isinstance(prices, pd.Series):
+        if np.isnan(prices.iloc[0]):
+            # se la prima osservazione è NaN
+            ts = prices.dropna()
+
+        ts_rebased = ts / ts.iloc[0] * level
+
+    if isinstance(prices, pd.DataFrame):
+        if any(prices.iloc[0].isna()):
+            # se vi è almeno un NaN nelle serie storiche
+            ts_rebased = list()
+            for col in prices.columns:
+                ts = prices[col].dropna()
+                ts_rebased.append(ts / ts.iloc[0] * level)
+            ts_rebased = pd.concat(ts_rebased, axis=1)
+        else:
+            ts_rebased = prices / prices.iloc[0] * level
+
+    # nel caso in cui ci siano NaN, la serie storica in output potrebbe avere un indice diverso rispetto a prices
+    ts_rebased = ts_rebased.reindex(prices.index)
+
+    return ts_rebased
 
 
 def compute_returns(prices, method="simple"):
@@ -423,6 +445,14 @@ def compute_corr(ts, df=None):
 
         elif isinstance(df, pd.Series):
             corr = ts.apply(lambda x: x.corr(df), axis=0).reset_index(name="corr")
+
+        elif isinstance(df, pd.DataFrame):
+            corr = list()
+            for i in range(len(df.columns)):
+                pair_corr = ts.apply(lambda x: x.corr(df[df.columns[i]]), axis=0)  # .reset_index(name=df.columns[i])
+                pair_corr.name = df.columns[i]
+                corr.append(pair_corr)
+            corr = pd.concat(corr, axis=1)
 
     return corr
 
