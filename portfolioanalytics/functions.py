@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 from scipy.stats import norm
 import warnings
+import datetime
 
 
 def rebase_ts(prices, level=100):
@@ -16,6 +17,8 @@ def rebase_ts(prices, level=100):
         if np.isnan(prices.iloc[0]):
             # se la prima osservazione è NaN
             ts = prices.dropna()
+        else:
+            ts = prices
 
         ts_rebased = ts / ts.iloc[0] * level
 
@@ -211,6 +214,23 @@ def compute_cagr(prices):
 
     return (value_factor ** (1 / year_past)) - 1
 
+
+def compute_allperiod_returns(ts, method="simple"):
+    """
+    Compute NON-annualized return between first and last available obs
+    :param ts: pd.Series or pd.DataFrame containing prices timeseries
+    :param method: str, "simple" or "log"
+    :return: 
+    """
+    assert isinstance(ts, (pd.Series, pd.DataFrame))
+
+    if method == "simple":
+        return ts.iloc[-1] / ts.iloc[0] - 1
+    elif method == "log":
+        return np.log(ts.iloc[-1] / ts.iloc[0])
+    else:
+        raise ValueError("method should be either simple or log")
+    
 
 def compute_annualized_volatility(returns):
     """
@@ -455,6 +475,138 @@ def compute_corr(ts, df=None):
             corr = pd.concat(corr, axis=1)
 
     return corr
+
+
+def compute_summary_statistics(ts, return_annualized=True):
+    """
+    Computes statistics (annualised return and annualised std) for various time-frame
+    Time-frames are: YTD, 1m, 3m, 6m, 1y, 2y, 3y, 5y, ALL
+    :param ts: pd.DataFrame with prices time series
+    :param return_annualized: boolean, if True return annualized returns, otherwise periodic returns
+    :return: pd.DataFrame(s) with summary statistics with column
+        if ts is pd.DataFrame: | ShareClassISIN | metric | interval | value |
+        if ts is pd.Series: | metric | interval | value |
+    """
+    assert(isinstance(ts, (pd.Series, pd.DataFrame)))
+    
+    # quanti anni è lunga la serie storica? in base a questo capiamo fino a che periodo possiamo calcolare
+    n_years = get_years_past(ts)
+
+    # calcola ritorni sui vari time-frame.
+    last_date = ts.index.to_list()[-1]
+    ytd_date = last_date + pd.tseries.offsets.YearEnd(-1)
+    one_mo_date = last_date + pd.tseries.offsets.DateOffset(months=-1)
+    three_mo_date = last_date + pd.tseries.offsets.DateOffset(months=-3)
+    six_mo_date = last_date + pd.tseries.offsets.DateOffset(months=-6)
+    one_ye_date = last_date + pd.tseries.offsets.DateOffset(years=-1)
+    two_ye_date = last_date + pd.tseries.offsets.DateOffset(years=-2)
+    three_ye_date = last_date + pd.tseries.offsets.DateOffset(years=-3)
+    five_ye_date = last_date + pd.tseries.offsets.DateOffset(years=-5)
+
+    ret = compute_returns(ts)
+    
+    if return_annualized:
+        return_function = compute_cagr
+        ret_type = "Annualized Return"
+    else:
+        return_function = compute_allperiod_returns
+        ret_type = "Return"
+    
+    if isinstance(ts, pd.Series):
+        statistics = [
+            [ret_type, "YTD", return_function(ts.loc[ytd_date:])],
+            [ret_type, "1 Month", return_function(ts.loc[one_mo_date:])],
+            [ret_type, "3 Months", return_function(ts.loc[three_mo_date:])],
+            [ret_type, "6 Months", return_function(ts.loc[six_mo_date:])],
+            [ret_type, "1 Year", return_function(ts.loc[one_ye_date:])],
+            [ret_type, "2 Years", return_function(ts.loc[two_ye_date:])],
+            [ret_type, "3 Years", return_function(ts.loc[three_ye_date:])],
+            [ret_type, "5 Years", return_function(ts.loc[five_ye_date:])],
+            [ret_type, "All Period", return_function(ts)],
+            ["Standard Deviation", "YTD", compute_annualized_volatility(ret.loc[ytd_date:])],
+            ["Standard Deviation", "1 Month", compute_annualized_volatility(ret.loc[one_mo_date:])],
+            ["Standard Deviation", "3 Months", compute_annualized_volatility(ret.loc[three_mo_date:])],
+            ["Standard Deviation", "6 Months", compute_annualized_volatility(ret.loc[six_mo_date:])],
+            ["Standard Deviation", "1 Year", compute_annualized_volatility(ret.loc[one_ye_date:])],
+            ["Standard Deviation", "2 Years", compute_annualized_volatility(ret.loc[two_ye_date:])],
+            ["Standard Deviation", "3 Years", compute_annualized_volatility(ret.loc[three_ye_date:])],
+            ["Standard Deviation", "5 Years", compute_annualized_volatility(ret.loc[five_ye_date:])],
+            ["Standard Deviation", "All Period", compute_annualized_volatility(ret)]
+        ]
+        # crea pd.DataFrame()
+        statistics = pd.DataFrame(statistics, columns=["metric", "interval", "value"])
+    
+    else:
+        # ts è pd.DataFrame()
+        statistics = pd.concat([
+            pd.DataFrame({"metric": ret_type, "interval": "YTD", "value": return_function(ts.loc[ytd_date:])}),
+            pd.DataFrame({"metric": ret_type, "interval": "1 Month", "value": return_function(ts.loc[one_mo_date:])}),
+            pd.DataFrame({"metric": ret_type, "interval": "3 Months", "value": return_function(ts.loc[three_mo_date:])}),
+            pd.DataFrame({"metric": ret_type, "interval": "6 Months", "value": return_function(ts.loc[six_mo_date:])}),
+            pd.DataFrame({"metric": ret_type, "interval": "1 Year", "value": return_function(ts.loc[one_ye_date:])}),
+            pd.DataFrame({"metric": ret_type, "interval": "2 Years", "value": return_function(ts.loc[two_ye_date:])}),
+            pd.DataFrame({"metric": ret_type, "interval": "3 Years", "value": return_function(ts.loc[three_ye_date:])}),
+            pd.DataFrame({"metric": ret_type, "interval": "5 Years", "value": return_function(ts.loc[five_ye_date:])}),
+            pd.DataFrame({"metric": ret_type, "interval": "All Period", "value": return_function(ts)}),
+            pd.DataFrame({"metric": "Standard Deviation", "interval": "YTD", 
+                          "value": compute_annualized_volatility(ret.loc[ytd_date:])}),
+            pd.DataFrame({"metric": "Standard Deviation", "interval": "1 Month",
+                          "value": compute_annualized_volatility(ret.loc[one_mo_date:])}),
+            pd.DataFrame({"metric": "Standard Deviation", "interval": "3 Months",
+                          "value": compute_annualized_volatility(ret.loc[three_mo_date:])}),
+            pd.DataFrame({"metric": "Standard Deviation", "interval": "6 Months",
+                          "value": compute_annualized_volatility(ret.loc[six_mo_date:])}),
+            pd.DataFrame({"metric": "Standard Deviation", "interval": "1 Years",
+                          "value": compute_annualized_volatility(ret.loc[one_ye_date:])}),
+            pd.DataFrame({"metric": "Standard Deviation", "interval": "2 Years",
+                          "value": compute_annualized_volatility(ret.loc[two_ye_date:])}),
+            pd.DataFrame({"metric": "Standard Deviation", "interval": "3 Years",
+                          "value": compute_annualized_volatility(ret.loc[three_ye_date:])}),
+            pd.DataFrame({"metric": "Standard Deviation", "interval": "5 Years",
+                          "value": compute_annualized_volatility(ret.loc[five_ye_date:])}),
+            pd.DataFrame({"metric": "Standard Deviation", "interval": "All Period",
+                          "value": compute_annualized_volatility(ret)})
+        ])
+        statistics = statistics.reset_index()
+
+    return statistics
+
+
+def compute_turnover(hldg, index="Date", columns="ISIN", values="w_rebase"):
+    """
+    NB: per il turnover preciso, usare Portfolio().portfolio_returns(verbose=True). quella funzione calcola
+    il turnover usando i pesi end of period.
+    Se si vuole calcolare il turnover di indici o ptf per cui si hanno solo i pesi puntuali alle rebalancing, ma non
+    i prezzi per poter calcolare i pesi end of period, allora usare questa funzione. è un'approssimazione molto fedele.
+    :param hldg: pd.DataFrame with holdings over time
+    :param index: column with dates. if pd.DF is indexed by Dates, then use index=True
+    :param columns: column with instruments identifier (es: "ISIN", "Ticker")
+    :param values: column with weights
+    :return: portfolio turnover over time
+    """
+
+    if index is True:
+        # https://docs.quantifiedcode.com/python-anti-patterns/readability/comparison_to_true.html
+        # Dates are in hdlg.index
+        hldg = hldg.reset_index()
+        index = "index"
+
+    if not all([x in hldg.columns for x in [index, columns, values]]):
+        raise IndexError(f"hldg must contains columns: {index}, {columns}, {values}")
+
+    # pivot per calcolare più velocemente il turnover
+    hh = hldg.pivot(index=index, columns=columns, values=values)
+    hh = hh.fillna(0)
+    
+    turnover_i = list()
+    for i in range(len(hh)):
+        if i == 0:
+            continue
+        turnover_i.append(np.sum(np.abs(hh.iloc[i] - hh.iloc[i - 1])) / 2)
+    
+    turnover = pd.Series(turnover_i, index=hh.index[1:])
+
+    return turnover
 
 
 # REPLICA

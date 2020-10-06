@@ -36,6 +36,28 @@ class Portfolio(object):
         self.ptf_ret, self.ptf_ts = self.portfolio_returns()
         self.benchmark_rate = benchmark_rate
 
+    def __repr__(self):
+        return f"Portfolio() with {len(self.prices.columns)} assets"
+    
+    def __str__(self):
+        ann_ret = pa.compute_cagr(self.ptf_ts)
+        ann_std = pa.compute_annualized_volatility(self.ptf_ret)
+        SR = pa.compute_sharpe_ratio(self.ptf_ts, self.benchmark_rate)
+        DD = pa.compute_max_drawdown(self.ptf_ts, self.method)
+        VaR = pa.compute_historical_var(self.ptf_ret, conf_lvl=.95)
+        return f"""
+        {'-' * 45}
+        * Portfolio with {len(self.prices.columns)} assets
+        * Analysed period: {min(self.prices.index).strftime('%Y-%m-%d')} - {max(self.prices.index).strftime('%Y-%m-%d')}
+        * Number of rebalancing events:  {len(self.weights)}
+        * Annualized Return:             {ann_ret:.2%}
+        * Annualized Standard Deviation: {ann_std:.2%}
+        * Sharpe Ratio:                  {SR:.2%}
+        * Max Drawdown:                  {DD:.2%}
+        * Historical VaR 95%:            {VaR:.2%}
+        {'-' * 45}
+        """
+
     def set_bh_ew_weights(self):
         """
         returns a pd.DataFrame with weights of buy-and-hold equally weighted ptf
@@ -60,7 +82,7 @@ class Portfolio(object):
                     lambda x: x / sum(x) * self.leverage, axis=1
                 )
 
-            if not all(np.isclose(weights.sum(axis=1), self.leverage, rtol=1e-09)):
+            if not all(np.isclose(weights.sum(axis=1), self.leverage, rtol=1e-06)):
                 warnings.warn(
                     "one or more rebalancing dates have weights not summing up to {}:\n".format(self.leverage) +
                     "adding a residual weight to compensate")
@@ -219,7 +241,7 @@ class Portfolio(object):
 
         return ptf_ret, ptf
     
-    def get_last_eop_weights(self, weights=None):
+    def get_eop_weights(self, weights=None):
         """
         
         :param weights: 
@@ -228,6 +250,21 @@ class Portfolio(object):
         _, ts, _, _, V_eop, _ = self.portfolio_returns(weights=weights, verbose=True)
         # compute end of period weights dividing the end of period value of each stock by the eop ptf value
         w_eop = V_eop.divide(ts, axis=0)
+        # seleziona i pesi end of period ad ogni chiusura prima del ribilanciamento
+        dates = [*self.weights, w_eop.index[-1]]
+        # drop first date: è la prima data di rebalancing
+        del dates[0]
+        w_eop = w_eop.loc[dates]
+
+        return w_eop
+    
+    def get_last_eop_weights(self, weights=None):
+        """
+        
+        :param weights: 
+        :return: 
+        """
+        w_eop = self.get_eop_weights(weights=weights)
         # get last w_eop: il peso delle stock all'ultima data di prices
         # https://www.shanelynn.ie/select-pandas-dataframe-rows-and-columns-using-iloc-loc-and-ix/
         last_w_eop = w_eop.iloc[[-1]]
