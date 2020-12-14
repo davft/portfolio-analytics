@@ -1,9 +1,14 @@
+# https://github.com/chrisconlan/algorithmic-trading-with-python/blob/master/src/pypm/metrics.py
+
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from scipy.stats import norm
+from scipy.optimize import root_scalar
 import warnings
 import datetime
+# https://stackoverflow.com/questions/16004076/python-importing-a-module-that-imports-a-module
+from . import dates as dt
 
 
 def rebase_ts(prices, level=100):
@@ -12,6 +17,8 @@ def rebase_ts(prices, level=100):
     :param prices: pd.Series or pd.DataFrame
     :param level: rebase to level
     """
+    if not isinstance(prices, (pd.Series, pd.DataFrame)):
+        raise TypeError("`prices` must be either pd.Series or pd.DataFrame")
 
     if isinstance(prices, pd.Series):
         if np.isnan(prices.iloc[0]):
@@ -22,9 +29,10 @@ def rebase_ts(prices, level=100):
 
         ts_rebased = ts / ts.iloc[0] * level
 
-    if isinstance(prices, pd.DataFrame):
+    else:
+        # case 2: isinstance(prices, pd.DataFrame)
         if any(prices.iloc[0].isna()):
-            # se vi è almeno un NaN nelle serie storiche
+            # se vi è almeno un NaN nella prima osservazione delle serie storiche
             ts_rebased = list()
             for col in prices.columns:
                 ts = prices[col].dropna()
@@ -52,14 +60,14 @@ def compute_returns(prices, method="simple"):
     elif method == "log":
         ret_fun = lambda x: np.log(x / x.shift(1, fill_value=x[0]))
     else:
-        raise ValueError("method should be either simple or log")
+        raise ValueError("`method` must be either 'simple' or 'log'")
 
     if isinstance(prices, pd.Series):
         returns = ret_fun(prices)
     elif isinstance(prices, pd.DataFrame):
         returns = prices.apply(ret_fun, axis=0)
     else:
-        raise TypeError("price_series should be either pd.Series or pd.DataFrame")
+        raise TypeError("prices must be either pd.Series or pd.DataFrame")
 
     return returns
 
@@ -80,14 +88,47 @@ def compute_ts(returns, method="simple", V0=100):
     elif method == "log":
         ts_fun = lambda x: V0 * np.exp(np.cumsum(returns))
     else:
-        raise ValueError("method should be either simple or log")
+        raise ValueError("`method` must be either 'simple' or 'log'")
 
     if isinstance(returns, pd.Series):
         prices = ts_fun(returns)
     elif isinstance(returns, pd.DataFrame):
         prices = returns.apply(ts_fun, axis=0)
     else:
-        raise TypeError("price_series should be either pd.Series or pd.DataFrame")
+        raise TypeError("`prices` must be either pd.Series or pd.DataFrame")
+
+    return prices
+
+
+def change_freq_ts(prices, freq="monthly"):
+    """
+    subsets of prices timeseries with desired frequency
+    :param prices: pd.Series or pd.DataFrame
+    :param freq: str: weekly, monthly, yearly (or: w, m, y)
+    :return: subset of prices with end of week/month/year obs
+    """
+    if not isinstance(prices, (pd.Series, pd.DataFrame)):
+        raise TypeError("`prices` must be either pd.Series or pd.DataFrame")
+
+    if not isinstance(prices.index, pd.core.indexes.datetimes.DatetimeIndex):
+        raise TypeError("`prices.index` must contains dates")
+
+    if isinstance(freq, str):
+        freq = freq.lower()
+        if freq not in ["weekly", "w", "monthly", "m", "yearly", "y"]:
+            raise ValueError("`freq` can be: 'weekly', 'monthly', 'yearly', or 'w', 'm', 'y'")
+    else:
+        raise TypeError("`freq` must be str")
+
+    if freq in ["weekly", "w"]:
+        idx = dt.get_end_of_weeks(dates=prices.index)
+    elif freq in ["monthly", "m"]:
+        idx = dt.get_end_of_months(dates=prices.index)
+    elif freq in ["yearly", "y"]:
+        idx = dt.get_end_of_years(dates=prices.index)
+
+    # subset prices
+    prices = prices.loc[idx]
 
     return prices
 
@@ -173,6 +214,7 @@ def compute_excess_return(ts, bmk_ts):
 def compute_tracking_error_vol(ts, bmk_ts):
     """
     compute tracking error volatility wrt a benchmark timeseries
+    input MUST be returns time-series
     :param ts: pd.Series or pd.DataFrame (returns)
     :param bmk_ts: pd.Series with benchmark returns
     """
@@ -215,6 +257,22 @@ def compute_cagr(prices):
     return (value_factor ** (1 / year_past)) - 1
 
 
+def compute_active_return(prices, bmk_prices):
+    """
+    active return = (cagr(prices) - cagr(bmk_prices))
+    :param prices:
+    :param bmk_prices:
+    :return:
+    """
+    # mantieni solo le date in comune
+    common_dates = set(prices.index).intersection(set(bmk_prices.index))
+    # cagr
+    ptf_cagr = compute_cagr(prices[prices.index.isin(common_dates)])
+    bmk_cagr = compute_cagr(bmk_prices[bmk_prices.index.isin(common_dates)])
+
+    return ptf_cagr - bmk_cagr
+
+
 def compute_allperiod_returns(ts, method="simple"):
     """
     Compute NON-annualized return between first and last available obs
@@ -253,6 +311,24 @@ def compute_sharpe_ratio(prices, benchmark_rate=0):
     return (cagr - benchmark_rate) / volatility
 
 
+def compute_information_ratio(prices, bmk_prices):
+    """
+    Compute the Information ratio wrt a benchmark
+    IR = (ptf_returns - bmk_returns) / tracking_error_vol
+    :param prices:
+    :param bmk_prices:
+    :return:
+    """
+    # compute active return
+    active_ret = compute_active_return(prices, bmk_prices)
+    # compute TEV
+    ptf_ret = compute_returns(prices)
+    bmk_ret = compute_returns(bmk_prices)
+    tev = compute_tracking_error_vol(ptf_ret, bmk_ret)
+
+    return active_ret / tev
+
+
 def compute_rolling_sharpe_ratio(prices, n=20, method="simple"):
     """
     Compute an *approximation* of the sharpe ratio on a rolling basis.
@@ -261,6 +337,182 @@ def compute_rolling_sharpe_ratio(prices, n=20, method="simple"):
     rolling_return_series = compute_returns(prices, method=method).rolling(n)
     return rolling_return_series.mean() / rolling_return_series.std()
 
+
+def compute_beta(ret, bmk_ret, use_linear_reg=False):
+    """
+    Computes single-regression beta.
+    If ret is pd.Series or pd.DataFrame with 1 column:
+        If bmk_ret is pd.Series or pd.DataFrame with 1 column:
+            output: scalar
+        Elif bmk_ret is pd.DataFrame with >1 column:
+            output: pd.DataFrame with 1 row (ret.name) and len(bmk_ret.columns) cols
+    Elif ret is pd.DataFrame with >1 columns:
+        If bmk_ret is pd.Series or pd.DataFrame with 1 column:
+            output: pd.DataFrame with 1 col (bmk_ret.name) and len(ret.columns) rows
+        Elif bmk_ret is pd.DataFrame with >1 column:
+            output: pd.DataFrame with len(ret.columns) rows and len(bmk_ret.columns) cols
+    https://corporatefinanceinstitute.com/resources/knowledge/finance/beta-coefficient/
+    :param ret: stock/portfolio returns. works with multiple timeseries as well
+    :param bmk_ret: benchmark returns. works with multiple benckmarks
+    :param use_linear_reg: boolean -> compute beta using linear regression?
+    :return:
+    """
+
+    if not isinstance(ret, (pd.Series, pd.DataFrame)):
+        raise TypeError("`ret` must be pd.Series or pd.DataFrame containing returns")
+    if not isinstance(bmk_ret, (pd.Series, pd.DataFrame)):
+        raise TypeError("`bmk_ret` must be pd.Series or pd.DataFrame containing benchmark returns")
+
+    if isinstance(ret, pd.Series):
+        ret = ret.to_frame(ret.name)
+
+    if isinstance(bmk_ret, pd.Series):
+        bmk_ret = bmk_ret.to_frame(bmk_ret.name)
+
+    # bisogna fare in modo che le date (.index) coincidano
+    if len(set(ret.index).symmetric_difference(bmk_ret.index)):
+        # merge per allineare le date
+        tmp = pd.concat([ret, bmk_ret], axis=1)
+        # inserisci zero al posto degli NA
+        tmp = tmp.fillna(0)
+        ret = tmp[ret.columns]
+        bmk_ret = tmp[bmk_ret.columns]
+
+    # inizializza un pd.DataFrame dove verranno salvati i beta
+    beta = np.zeros((len(ret.columns), len(bmk_ret.columns)))
+    beta = pd.DataFrame(beta, index=ret.columns, columns=bmk_ret.columns)
+
+    if use_linear_reg:
+        # use linear regression to compute beta
+        m = LinearRegression(fit_intercept=True)
+
+        for icol in range(len(ret.columns)):
+            for jcol in range(len(bmk_ret.columns)):
+                # reg: ret = alpha + beta * bmk_ret
+                # bmk_ret è il ritorno del mercato nel CAPM
+                m.fit(bmk_ret.iloc[:, [jcol]], ret.iloc[:, [icol]])
+                beta.iloc[icol, jcol] = m.coef_[0][0]
+
+    else:
+        # use variance - covariance
+        # variance and covariance
+        # serve lavorare su un unico pd.DataFrame
+        tmp = pd.concat([ret, bmk_ret], axis=1)
+        # inserisci zero al posto degli NA
+        tmp = tmp.fillna(0)
+        for jcol in bmk_ret.columns:
+            m = np.cov(tmp[[*ret.columns, jcol]], rowvar=False)
+            variance = m[(m.shape[0] - 1), (m.shape[1] - 1)]
+            # non considerare la covarianza con il benchmark
+            covariance = m[:-1, (m.shape[1] - 1)]
+            # salva beta
+            beta[jcol] = covariance / variance
+
+    if sum(beta.shape) == 2:
+        # ritorna scalare
+        beta = beta.iloc[0, 0]
+
+    return beta
+
+
+def compute_multiple_beta(y, xs):
+    """
+    Computes multiple linear regression y = a + b_1 * xs_1 + b_2 * xs_2 + .. + b_n * xs_n
+    :param y: stock/portfolio returns. must be pd.Series or pd.DataFrame with one column
+    :param xs: benchmark returns. must be pd.Series or pd.DataFrame
+    :return:
+    """
+
+    if not isinstance(y, (pd.Series, pd.DataFrame)):
+        raise TypeError("`y` must be pd.Series or pd.DataFrame containing independent variable returns")
+    if not isinstance(xs, (pd.Series, pd.DataFrame)):
+        raise TypeError("`xs` must be pd.Series or pd.DataFrame containing dependent variables returns")
+
+    if isinstance(y, pd.Series):
+        y = y.to_frame(y.name)
+    elif isinstance(y, pd.DataFrame):
+        if y.shape[1] > 1:
+            print("`y` must contains only one column. subsetting `y` to obtain a 1col df")
+
+    if isinstance(xs, pd.Series):
+        xs = xs.to_frame(xs.name)
+
+    # bisogna fare in modo che le date (.index) coincidano
+    if len(set(y.index).symmetric_difference(xs.index)):
+        # merge per allineare le date
+        tmp = pd.concat([y, xs], axis=1)
+        # inserisci zero al posto degli NA
+        tmp = tmp.fillna(0)
+        y = tmp[y.columns]
+        xs = tmp[xs.columns]
+
+    # inizializza un pd.DataFrame dove verranno salvati i beta
+    beta = np.zeros((len(xs.columns), len(y.columns)))
+    beta = pd.DataFrame(beta, index=xs.columns, columns=y.columns)
+
+    # multiple regression
+    m = LinearRegression(fit_intercept=True)
+    m.fit(xs, y)
+    beta[y.columns[0]] = m.coef_.transpose()
+
+    return beta
+
+
+# def compute_beta(ret, bmk_ret, use_linear_reg=False, single_reg=True):
+#     """
+#     https://corporatefinanceinstitute.com/resources/knowledge/finance/beta-coefficient/
+#     :param ret: stock/portfolio returns. works with multiple timeseries as well
+#     :param bmk_ret: benchmark returns
+#     :param use_linear_reg: boolean -> compute beta using linear regression?
+#     :param single_reg: boolean. if True, linear reg of one var, otherwise multivar linear reg
+#     :return:
+#     """
+#     
+#     if not isinstance(ret, (pd.Series, pd.DataFrame)):
+#         raise TypeError("`ret` must be pd.Series or pd.DataFrame containing returns")
+#     if not isinstance(bmk_ret, pd.Series):
+#         raise TypeError("`bmk_ret` must be pd.Series containing benchmark returns")
+#     
+#     # metti insieme le due serie storiche per considerare le stesse date
+#     ts_ret = pd.concat([ret, bmk_ret], axis=1)
+#     # rimuovi NA
+#     ts_ret = ts_ret.fillna(0)
+#     if (len(ts_ret) != len(ret)) or (len(ts_ret) != len(bmk_ret)):
+#         print("Dropping some obs (`ret` and `bmk_ret` do not have the same index)."
+#               " Please check manually if this is okay for you.")
+# 
+#     if use_linear_reg:
+#         # use linear regression to compute beta
+#         # controlla se il codice fa effettivamente quanto richiesto
+#         m = LinearRegression(fit_intercept=True)
+#         if isinstance(ret, pd.Series):
+#             m.fit(ts_ret.iloc[:, [0]], ts_ret.iloc[:, [-1]])
+#             beta = m.coef_[0][0]
+#         else:
+#             if single_reg:
+#                 # fai la regressione singola di ogni stock/ptf vs bmk
+#                 beta = list()
+#                 for icol in range(len(ret.columns)):
+#                     m.fit(ts_ret.iloc[:, [icol]], ts_ret.iloc[:, [-1]])
+#                     beta.append(m.coef_[0][0])
+#             else:
+#                 # usa regressione multipla
+#                 m.fit(ts_ret[:, :-1], ts_ret.iloc[:, [-1]])
+#                 beta = m.coef_[0]
+#     else:
+#         # use variance - covariance
+#         # variance and covariance
+#         m = np.cov(ts_ret, rowvar=False)
+#         variance = m[(m.shape[0] - 1), (m.shape[1] - 1)]
+#         # non considerare la covarianza con il benchmark
+#         covariance = m[:-1, (m.shape[1] - 1)]
+#         beta = covariance / variance
+#     
+#     if isinstance(ret, pd.DataFrame):
+#         beta = pd.Series(beta, index=ret.columns)
+#         
+#     return beta
+    
 
 def compute_annualized_downside_deviation(returns, benchmark_rate=0):
     """
@@ -556,7 +808,7 @@ def compute_summary_statistics(ts, return_annualized=True):
                           "value": compute_annualized_volatility(ret.loc[three_mo_date:])}),
             pd.DataFrame({"metric": "Standard Deviation", "interval": "6 Months",
                           "value": compute_annualized_volatility(ret.loc[six_mo_date:])}),
-            pd.DataFrame({"metric": "Standard Deviation", "interval": "1 Years",
+            pd.DataFrame({"metric": "Standard Deviation", "interval": "1 Year",
                           "value": compute_annualized_volatility(ret.loc[one_ye_date:])}),
             pd.DataFrame({"metric": "Standard Deviation", "interval": "2 Years",
                           "value": compute_annualized_volatility(ret.loc[two_ye_date:])}),
@@ -742,6 +994,84 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
     return replica
 
 
+def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="weight", id_col="ISIN"):
+    """
+    Replica di un index/ETF/ptf utilizzando la metodologia di Lux:
+        - aggregazione per le colonne indicate in groupby
+        - calcola il numero di titoli per ogni cella, problema di root finding per arrivare ad N titoli
+        - calcola il peso dato aggregazione cella / numero titoli per ogni cella
+        - seleziona il numero di stock richiesto ed assegna il peso di cui sopra
+        - si ottiene quindi una replica equipesata all'interno di ogni cella
+    :param hldg: pd.DataFrame contenente le holdings riferite ad una sola data
+    :param N: int, numero finale di titoli che si vogliono ottenere nella replica
+    :param groupby: str or list, colonne da usare per l'aggregazione
+    :param agg: None or pd.DataFrame, serve per ottenere una scomposizione su groupby CUSTOM
+        - es/ per replica di TRVCI si parte da composizioni SPX, si aggrega per settore, e si aggiustano i pesi
+            settoriali utilizzando il beta settoriale vs TRVCI. si calcola fuori dalla funzione e lo si da in input
+    :param w_col: str, nome della colonna contenente i pesi di ogni titolo nel ptf iniziale
+    :param id_col: str, nome della colonna contenete ISIN, ticker, CUSIP (identifier degli strumenti)
+    :return: replica, pd.DataFrame
+    """
+    # hldg = spx_hldg[spx_hldg["Date"] == max(spx_hldg["Date"])]
+    if not isinstance(groupby, (str, list)):
+        raise TypeError("`groupby` must be str or list")
+    if isinstance(groupby, str):
+        groupby = [groupby]
+
+    if not isinstance(w_col, str):
+        raise TypeError("`w_col` must be str")
+    if not isinstance(id_col, str):
+        raise TypeError("`id_col` must be str")
+
+    # columns required for computing replica portfolio
+    required_cols = [id_col, w_col, *groupby]
+    if not set(required_cols).issubset(hldg.columns):
+        raise Exception(f"`hldg` must have columns: {id_col}, {w_col}, {groupby}")
+
+    if agg is None:
+        # calcolare agg se non è fornito
+        agg = hldg.groupby(groupby)[w_col].sum().reset_index(name="w_groupby")
+    else:
+        if not {*groupby, "w_groupby"}.issubset(agg.columns):
+            raise Exception
+
+    def find_N_fittizio(x, agg, N):
+        N_tmp = [round(x * y, 0) for y in agg["w_groupby"]]
+        return sum(N_tmp) - N
+
+    N_fittizio = root_scalar(find_N_fittizio, args=(agg, N), bracket=[0, N + 50], x0=N).root
+
+    # calcola il numero di stock che vanno selezionate per ogni combinazione groupby
+    agg["n_stocks"] = [int(round(N_fittizio * x, 0)) for x in agg["w_groupby"]]
+    # calcola il peso (equally weighted) di ogni stock all'interno del groupby
+    agg["w_stock"] = agg["w_groupby"] / agg["n_stocks"]
+
+    # se c'è GOOGL US (US02079K3059) rimuovi GOOG US (US02079K1079)
+    if "US02079K3059" in hldg[id_col]:
+        hldg = hldg[hldg[id_col] != "US02079K1079"]
+
+    # sort by groupby and weight, ascending order for groupby and descending for weight
+    hldg = hldg.sort_values([*groupby, w_col], ascending=[*[True] * len(groupby), False])
+
+    # aggiungi info su n_stock a hldg
+    hldg = hldg.merge(agg[[*groupby, "n_stocks"]], how="left", on=groupby)
+    # NA sono le celle non scelte
+    replica = hldg.dropna()
+    # seleziona i titoli che vanno scelti
+    replica = replica.groupby(groupby).apply(lambda x: x.iloc[0:min(int(x["n_stocks"].unique()), x.shape[0])])
+    replica = replica.reset_index(drop=True)
+
+    # set replica weights
+    # aggiungi colonna contente il peso di ogni combinazione groupby
+    replica = replica.merge(agg[[*groupby, "w_stock"]], how="left", on=groupby)
+    replica["w_replica"] = replica["w_stock"]
+
+    output_cols = [id_col, w_col, *groupby, "w_replica"]
+    replica = replica[output_cols]
+
+    return replica
+
+
 def compute_groupby_difference(hldg, bmk_hldg, groupby=[]):
     """
     compute difference between aggregation of ptf vs index
@@ -780,3 +1110,22 @@ def compute_groupby_difference(hldg, bmk_hldg, groupby=[]):
     diff["difference"] = diff["ptf_exp"] - diff["bmk_exp"]
 
     return diff
+
+
+def get_ew_weights(ptf, groupby=("data_val", "index_ticker"), on="ticker", index="data_val"):
+    """
+    Get pd.DataFrame to be used as `weights` for `Portfolio()`
+    the function only works with ALL input. Must be extended to allows groupby=None and index=None
+    :param ptf: pd.DataFrame with cols at least (groupby, on, index)
+    :param groupby: at what level applies the equally weighted portfolio
+    :param on: column of `ptf`, ideally "ticker" or "ISIN"
+    :param index: columns of `ptf` with dates
+    :return:
+    """
+    # add column with equally weighted weights at the `groupby` level
+    ptf["weights"] = ptf.groupby(groupby)[on].transform(lambda x: 1 / len(x))
+    # pivot to get the desired shape
+    ew_weights = ptf.pivot(index=index, columns=on, values="weights")
+    # fill NAs with 0
+    ew_weights = ew_weights.fillna(0)
+    return ew_weights
