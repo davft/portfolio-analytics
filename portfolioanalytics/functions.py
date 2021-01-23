@@ -863,7 +863,7 @@ def compute_turnover(hldg, index="Date", columns="ISIN", values="w_rebase"):
 
 # REPLICA
 def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_coverage=.85, groupby_coverage=None,
-                            threshold=.02, rebase=1, identifier_col="isin", weight_col="w", keep_all_cols=True):
+                            threshold=.02, rebase=1, minw=0, maxw=1, id_col="isin", w_col="w", keep_all_cols=True):
     """
     Compute replica of a portfolio (could be index), grouping on key specified by `groupby`
     :param holdings: pd.DataFrame with components for a single date
@@ -873,8 +873,10 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
         Makes sense to be used if index is weighted by marketcap
     :param threshold: minimum weight a groupby cell must have in order to get more than 1 stock. float
     :param rebase: int/float or None. if None, do not rebase. if not None, rebase to value of rebase
-    :param identifier_col: str, column of holdings. col of the identifier
-    :param weight_col: str, column of holdings. col of the weights
+    :param minw: float, minimum weight
+    :param maxw: float, maximum weight
+    :param id_col: str, column of holdings. col of the identifier
+    :param w_col: str, column of holdings. col of the weights
     :param keep_all_cols: boolean, if True keep all columns from initial holdings
     :return replica portfolio
     """
@@ -899,17 +901,23 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
     if rebase is not None:
         if not isinstance(rebase, (int, float)):
             raise TypeError("groupby_coverage must be None or int/float")
-    if not isinstance(identifier_col, str):
-        raise TypeError("identifier_col must be str")
-    if not isinstance(weight_col, str):
-        raise TypeError("weight_col must be str")
+    assert isinstance(minw, (int, float)), "`minw` must be float"
+    assert isinstance(maxw, (int, float)), "`maxw` must be float"
+    if (minw < 0) | (minw >= 1):
+        raise ValueError("`minw` in [0, 1) required")
+    if (maxw <= 0) | (maxw > 1):
+        raise ValueError("`maxw` in (0, 1] required")
+    if not isinstance(id_col, str):
+        raise TypeError("id_col must be str")
+    if not isinstance(w_col, str):
+        raise TypeError("w_col must be str")
     if not isinstance(keep_all_cols, bool):
         raise TypeError("keep_all_cols must be boolean")
 
     # check if all needed columns are in holdings
-    required_cols = [identifier_col, weight_col, *groupby]
+    required_cols = [id_col, w_col, *groupby]
     if not set(required_cols).issubset(set(holdings.columns)):
-        raise Exception(f"components must have columns: {identifier_col}, {weight_col}, {groupby}")
+        raise Exception(f"components must have columns: {id_col}, {w_col}, {groupby}")
 
     def cut_coverage(df, col, lvl):
         """
@@ -924,12 +932,12 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
 
     if rebase is not None:
         # rebase weights
-        holdings[weight_col] = holdings[weight_col] / (holdings[weight_col].sum() * rebase)
+        holdings[w_col] = holdings[w_col] / (holdings[w_col].sum() * rebase)
 
     if keep_all_cols:
         # mantieni da parte le colonne non necessarie, fai il merge in fondo
         other_cols = list(set(holdings.columns).difference(required_cols))
-        other_cols.append(identifier_col)
+        other_cols.append(id_col)
         if len(other_cols) > 1:
             df_other_cols = holdings[other_cols]
 
@@ -937,9 +945,9 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
     hldg = holdings[required_cols]
     stat = hldg.groupby(groupby).sum()
     # sort descending by weight
-    stat = stat.sort_values(by=[weight_col], ascending=False)
+    stat = stat.sort_values(by=[w_col], ascending=False)
     # compute cumulative sum
-    stat["cumulative_sum"] = stat[weight_col].cumsum()
+    stat["cumulative_sum"] = stat[w_col].cumsum()
     stat = stat.reset_index()
     # select groupby cells up to `overall_coverage`
     cells = cut_coverage(stat, col="cumulative_sum", lvl=overall_coverage)
@@ -947,7 +955,7 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
     print(f"Selecting first {len(cells)} out of {len(stat)} combinations of {groupby}")
 
     # rebase weight to 1 on selected cells
-    cells["w_rebase"] = cells[weight_col] / cells[weight_col].sum()
+    cells["w_rebase"] = cells[w_col] / cells[w_col].sum()
 
     # assegna il numero di titoli da scegliere all'interno di ogni combinazione groupby
     cells["n_stocks"] = np.ceil(cells["w_rebase"] / threshold)
@@ -961,7 +969,7 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
         hldg = pd.merge(hldg, cells[[*groupby, "n_stocks"]], how="left", on=groupby)
 
         # sort by groupby and weight, ascending order for groupby and descending for weight
-        hldg = hldg.sort_values([*groupby, weight_col], ascending=[*[True] * len(groupby), False])
+        hldg = hldg.sort_values([*groupby, w_col], ascending=[*[True] * len(groupby), False])
 
         # NA sono le celle non scelte
         replica = hldg.dropna()
@@ -994,11 +1002,11 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
         cells_k = cells.loc[cells["n_stocks"] > 1]
         hldg_k = pd.merge(hldg, cells_k[groupby], how="inner", on=groupby)
         # sort by groupby and weight, ascending order for groupby and descending for weight
-        hldg_k = hldg_k.sort_values([*groupby, weight_col], ascending=[*[True] * len(groupby), False])
+        hldg_k = hldg_k.sort_values([*groupby, w_col], ascending=[*[True] * len(groupby), False])
 
         # calcola il peso cumulato delle combinazioni groupby
         hldg_k["cumulative_sum"] = \
-            hldg_k.groupby(groupby).apply(lambda x: x[weight_col].cumsum() / x[weight_col].sum()).values
+            hldg_k.groupby(groupby).apply(lambda x: x[w_col].cumsum() / x[w_col].sum()).values
         # prendi le prime k stocks s.t. vi è una copertura almeno del copertura_groupby%
         replica = hldg_k.groupby(groupby).apply(lambda x: cut_coverage(x, col="cumulative_sum", lvl=groupby_coverage))
         replica = replica.reset_index(drop=True)
@@ -1009,7 +1017,7 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
         if len(cells_k):
             hldg_k = pd.merge(hldg, cells_k[groupby], how="inner", on=groupby)
             # sort by groupby and weight, ascending order for groupby and descending for weight
-            hldg_k = hldg_k.sort_values([*groupby, weight_col], ascending=[*[True] * len(groupby), False])
+            hldg_k = hldg_k.sort_values([*groupby, w_col], ascending=[*[True] * len(groupby), False])
 
             # prendi le prime stocks in ogni combinazione ed aggiungile a ptf
             replica = replica.append(
@@ -1022,13 +1030,23 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
     # aggiungi colonna contente il peso di ogni combinazione groupby
     replica = pd.merge(replica, cells[[*groupby, "w_rebase"]], how="left", on=groupby)
     replica["w_replica"] = \
-        replica.groupby(groupby).apply(lambda x: x[weight_col] / x[weight_col].sum() * x["w_rebase"]).values
+        replica.groupby(groupby).apply(lambda x: x[w_col] / x[w_col].sum() * x["w_rebase"]).values
 
     output_cols = [*required_cols, "w_replica"]
     replica = replica[output_cols]
 
     if keep_all_cols:
-        replica = replica.merge(df_other_cols, how="left", on=[identifier_col])
+        replica = replica.merge(df_other_cols, how="left", on=[id_col])
+
+    # drop w_col (corresponds to original index weight), rename "w_replica" to w_col (easier to use later in the script)
+    del replica[w_col]
+    replica = replica.rename(columns={"w_replica": w_col})
+
+    # check if weights respect bounds, if not rebase them
+    # perform this operation on a groupby-level, in order to maintain the same overall exposure
+    replica = replica.groupby(groupby)\
+        .apply(lambda x: redistribuite_weights_given_bounds(df=x, minw=minw, maxw=maxw, w_col=w_col))\
+        .reset_index(drop=True)
 
     return replica
 
@@ -1133,42 +1151,40 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
     return replica
 
 
-def compute_groupby_difference(hldg, bmk_hldg, groupby=[]):
+def compute_groupby_difference(hldg, bmk_hldg, groupby="GICS Sector", w_col="Weight"):
     """
     compute difference between aggregation of ptf vs index
     :param hldg: pd.DataFrame with portfolio composition [only one ptf per call]
     :param bmk_hldg: pd.DataFrame with benchmark composition
     :param groupby: list of keys to groupby
+    :param w_col: str, weight colname
     # :param verbose: boolean, if True return tuples (diff, ptf_exp, bmk_exp)
     """
     if not isinstance(hldg, pd.DataFrame):
-        print("`hldg` must be a pd.DataFrame containing portfolio compositions")
-        return
+        raise TypeError("`hldg` must be a pd.DataFrame containing portfolio compositions")
     if not isinstance(bmk_hldg, pd.DataFrame):
-        print("`bmk_hldg` must be a pd.DataFrame containing portfolio compositions")
-        return
-    if not len(groupby):
-        print("`groupby` must be str or list of str with column names")
-        return
+        raise TypeError("`bmk_hldg` must be a pd.DataFrame containing portfolio compositions")
+    if not isinstance(groupby, (str, list)):
+        raise TypeError("`groupby` must be str or list of str with column names")
     if isinstance(groupby, str):
         groupby = [groupby]
+    if not isinstance(w_col, str):
+        raise TypeError("w_col must be str")
 
-        # columns to lowercase
-    hldg.columns = hldg.columns.map(lambda x: x.lower())
-    bmk_hldg.columns = bmk_hldg.columns.map(lambda x: x.lower())
-    groupby = list(map(lambda x: x.lower(), groupby))
+    # # columns to lowercase
+    # hldg.columns = hldg.columns.map(lambda x: x.lower())
+    # bmk_hldg.columns = bmk_hldg.columns.map(lambda x: x.lower())
+    # groupby = list(map(lambda x: x.lower(), groupby))
 
 
     # group by `groupby` and compute allocation weights
-    fun_exposure = lambda x: x["w"].sum()
-    ptf_exposure = hldg.groupby(groupby).apply(fun_exposure)
-    ptf_exposure.name = "ptf_exp"
-    bmk_exposure = bmk_hldg.groupby(groupby).apply(fun_exposure)
-    bmk_exposure.name = "bmk_exp"
+    fun_exposure = lambda x: x[w_col].sum()
+    ptf_exposure = hldg.groupby(groupby).apply(fun_exposure).reset_index(name="replica_exp")
+    bmk_exposure = bmk_hldg.groupby(groupby).apply(fun_exposure).reset_index(name="bmk_exp")
 
-    diff = pd.merge(ptf_exposure, bmk_exposure, how="outer", left_index=True, right_index=True)
+    diff = pd.merge(ptf_exposure, bmk_exposure, how="outer", on=groupby)
     diff = diff.fillna(0)
-    diff["difference"] = diff["ptf_exp"] - diff["bmk_exp"]
+    diff["difference"] = diff["replica_exp"] - diff["bmk_exp"]
 
     return diff
 
@@ -1190,3 +1206,58 @@ def get_ew_weights(ptf, groupby=("data_val", "index_ticker"), on="ticker", index
     # fill NAs with 0
     ew_weights = ew_weights.fillna(0)
     return ew_weights
+
+
+def redistribuite_weights_given_bounds(df, minw=0, maxw=1, w_col="Weight"):
+    """
+    Check if weights in df respect bounds [minw, maxw]. if yes return df
+    If not, squeeze distribution (if possibile) to make weights respect bounds
+    :param df: pd.DataFrame, containing at least w_col column
+    :param minw: float [0, 1)
+    :param maxw: float (0, 1]
+    :param w_col: str, name of column containing weights
+    :return:
+    """
+
+    assert isinstance(df, pd.DataFrame), "`df` must be pd.DataFrame"
+    assert isinstance(minw, (int, float)), "`minw` must be float"
+    assert isinstance(maxw, (int, float)), "`maxw` must be float"
+    assert isinstance(w_col, str), "`w_col` must be str"
+    if (minw < 0) | (minw >= 1):
+        raise ValueError("`minw` in [0, 1) required")
+    if (maxw <= 0) | (maxw > 1):
+        raise ValueError("`maxw` in (0, 1] required")
+
+    # check if bounds are respected
+    if (min(df[w_col]) >= minw) & (max(df[w_col]) <= maxw):
+        # if yes, no adjustment needed
+        return df
+
+    # check if operation is feasible
+    if sum(df[w_col]) < len(df) * minw:
+        raise ValueError(f"infeasible: sum(df[w_col]) must be >= len(df) * minw ({len(df) * minw:.2%}) "
+                         f"it is {sum(df[w_col]):.2%}")
+    if sum(df[w_col]) > len(df) * maxw:
+        raise ValueError(f"infeasible: sum(df[w_col]) must be <= len(df) * maxw: ({len(df) * maxw:.2%}) "
+                         f"it is {sum(df[w_col]):.2%}")
+
+    # isolate values not in bound (and on its limits): [0, minw], [maxw, 1]
+    out_bound = df[(df[w_col] <= minw) | (df[w_col] >= maxw)]
+    while len(out_bound[(out_bound[w_col] < minw) | (out_bound[w_col] > maxw)]):
+        # compute how much weight you need to redistribuite across obs in bounds
+        # 1. weight needed to bring values below minw to minw (negative quantity)
+        excess_w = sum(out_bound[out_bound[w_col] < minw][w_col]) - len(out_bound[out_bound[w_col] < minw]) * minw
+        # 2. excess weight you get from bringing values above maxw to maxw (positive quantity)
+        excess_w += sum(out_bound[out_bound[w_col] > maxw][w_col]) - len(out_bound[out_bound[w_col] > maxw]) * maxw
+        # floor weights to minw and cap to maxw
+        out_bound[w_col] = out_bound[w_col].clip(minw, maxw)
+
+        btw_bound = df[(df[w_col] > minw) & (df[w_col] < maxw)]
+        btw_bound[w_col] = btw_bound[w_col] + btw_bound[w_col] / sum(btw_bound[w_col]) * excess_w
+
+        # override df with the new weights
+        df = pd.concat([btw_bound, out_bound], axis=0)
+        # isolate again values not in bound to repeat the cycle if needed
+        out_bound = df[(df[w_col] <= minw) | (df[w_col] >= maxw)]
+
+    return df
