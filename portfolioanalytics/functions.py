@@ -216,17 +216,30 @@ def compute_tracking_error_vol(ts, bmk_ts):
     compute tracking error volatility wrt a benchmark timeseries
     input MUST be returns time-series
     :param ts: pd.Series or pd.DataFrame (returns)
-    :param bmk_ts: pd.Series with benchmark returns
+    :param bmk_ts: pd.Series or pd.DataFrame with benchmark(s) returns
     """
     if not isinstance(ts, (pd.Series, pd.DataFrame)):
         print("`ts` must be pd.Series or pd.DataFrame")
         return
-    if not isinstance(bmk_ts, pd.Series):
-        print("`bmk_ts` must be pd.Series")
+    if not isinstance(bmk_ts, (pd.Series, pd.DataFrame)):
+        print("`bmk_ts` must be pd.Series or pd.DataFrame")
         return
+    
+    if isinstance(bmk_ts, pd.Series):
+        excess_return = compute_excess_return(ts=ts, bmk_ts=bmk_ts)
+        tev = compute_annualized_volatility(excess_return)
+        if isinstance(ts, pd.DataFrame):
+            tev.name = "tev"
 
-    excess_return = compute_excess_return(ts=ts, bmk_ts=bmk_ts)
-    tev = compute_annualized_volatility(excess_return)
+    elif isinstance(bmk_ts, pd.DataFrame):
+        tev = list()
+        for i in range(len(bmk_ts.columns)):
+            excess_return = compute_excess_return(ts=ts, bmk_ts=bmk_ts[bmk_ts.columns[i]])
+            pair_tev = compute_annualized_volatility(excess_return)
+            pair_tev.name = bmk_ts.columns[i]
+            tev.append(pair_tev)
+
+        tev = pd.concat(tev, axis=1)
 
     return tev
 
@@ -270,7 +283,15 @@ def compute_active_return(prices, bmk_prices):
     ptf_cagr = compute_cagr(prices[prices.index.isin(common_dates)])
     bmk_cagr = compute_cagr(bmk_prices[bmk_prices.index.isin(common_dates)])
 
-    return ptf_cagr - bmk_cagr
+    if isinstance(bmk_prices, pd.DataFrame):
+        output = pd.DataFrame(np.zeros((len(ptf_cagr), len(bmk_prices.columns))), 
+                              index=ptf_cagr.index, columns=bmk_prices.columns)
+        for col in bmk_prices.columns:
+            output[col] = ptf_cagr - bmk_cagr[col]
+    else:
+        output = ptf_cagr - bmk_cagr
+
+    return output
 
 
 def compute_allperiod_returns(ts, method="simple"):
@@ -300,41 +321,42 @@ def compute_annualized_volatility(returns):
     return returns.std() * np.sqrt(entries_per_year)
 
 
-def compute_sharpe_ratio(prices, benchmark_rate=0):
+def compute_sharpe_ratio(returns, benchmark_rate=0):
     """
     Calculates the sharpe ratio given a price series. Defaults to benchmark_rate
     of zero.
     """
+    prices = compute_ts(returns)
     cagr = compute_cagr(prices)
-    returns = compute_returns(prices)
+    # returns = compute_returns(prices)
     volatility = compute_annualized_volatility(returns)
     return (cagr - benchmark_rate) / volatility
 
 
-def compute_information_ratio(prices, bmk_prices):
+def compute_information_ratio(returns, bmk_returns):
     """
     Compute the Information ratio wrt a benchmark
     IR = (ptf_returns - bmk_returns) / tracking_error_vol
-    :param prices:
-    :param bmk_prices:
+    :param returns: portfolio returns. pd.Series or pd.DataFrame
+    :param bmk_returns: benchmark returns. pd.Series or pd.DataFrame
     :return:
     """
+    prices = compute_ts(returns)
+    bmk_prices = compute_ts(bmk_returns)
     # compute active return
     active_ret = compute_active_return(prices, bmk_prices)
     # compute TEV
-    ptf_ret = compute_returns(prices)
-    bmk_ret = compute_returns(bmk_prices)
-    tev = compute_tracking_error_vol(ptf_ret, bmk_ret)
+    tev = compute_tracking_error_vol(returns, bmk_returns)
 
     return active_ret / tev
 
 
-def compute_rolling_sharpe_ratio(prices, n=20, method="simple"):
+def compute_rolling_sharpe_ratio(prices, window=20, method="simple"):
     """
     Compute an *approximation* of the sharpe ratio on a rolling basis.
     Intended for use as a preference value.
     """
-    rolling_return_series = compute_returns(prices, method=method).rolling(n)
+    rolling_return_series = compute_returns(prices, method=method).rolling(window)
     return rolling_return_series.mean() / rolling_return_series.std()
 
 
@@ -367,14 +389,19 @@ def compute_beta(ret, bmk_ret, use_linear_reg=False):
         ret = ret.to_frame(ret.name)
 
     if isinstance(bmk_ret, pd.Series):
+        bmk_series = True
         bmk_ret = bmk_ret.to_frame(bmk_ret.name)
+    else:
+        bmk_series = False
 
     # bisogna fare in modo che le date (.index) coincidano
     if len(set(ret.index).symmetric_difference(bmk_ret.index)):
         # merge per allineare le date
         tmp = pd.concat([ret, bmk_ret], axis=1)
         # inserisci zero al posto degli NA
-        tmp = tmp.fillna(0)
+        # tmp = tmp.fillna(0)
+        # rimuovi gli NA
+        tmp = tmp.dropna()
         ret = tmp[ret.columns]
         bmk_ret = tmp[bmk_ret.columns]
 
@@ -399,7 +426,9 @@ def compute_beta(ret, bmk_ret, use_linear_reg=False):
         # serve lavorare su un unico pd.DataFrame
         tmp = pd.concat([ret, bmk_ret], axis=1)
         # inserisci zero al posto degli NA
-        tmp = tmp.fillna(0)
+        # tmp = tmp.fillna(0)
+        # rimuovi gli NA
+        tmp = tmp.dropna()
         for jcol in bmk_ret.columns:
             m = np.cov(tmp[[*ret.columns, jcol]], rowvar=False)
             variance = m[(m.shape[0] - 1), (m.shape[1] - 1)]
@@ -408,7 +437,14 @@ def compute_beta(ret, bmk_ret, use_linear_reg=False):
             # salva beta
             beta[jcol] = covariance / variance
 
-    if sum(beta.shape) == 2:
+    if bmk_series:
+        # output pd.Series, not pd.DataFrame
+        beta = beta[bmk_ret.columns[0]]
+
+    if sum(beta.shape) == 1:
+        # ritorna scalare
+        beta = beta[0]
+    elif sum(beta.shape) == 2 and not bmk_series:
         # ritorna scalare
         beta = beta.iloc[0, 0]
 
@@ -458,61 +494,53 @@ def compute_multiple_beta(y, xs):
     return beta
 
 
-# def compute_beta(ret, bmk_ret, use_linear_reg=False, single_reg=True):
-#     """
-#     https://corporatefinanceinstitute.com/resources/knowledge/finance/beta-coefficient/
-#     :param ret: stock/portfolio returns. works with multiple timeseries as well
-#     :param bmk_ret: benchmark returns
-#     :param use_linear_reg: boolean -> compute beta using linear regression?
-#     :param single_reg: boolean. if True, linear reg of one var, otherwise multivar linear reg
-#     :return:
-#     """
-#     
-#     if not isinstance(ret, (pd.Series, pd.DataFrame)):
-#         raise TypeError("`ret` must be pd.Series or pd.DataFrame containing returns")
-#     if not isinstance(bmk_ret, pd.Series):
-#         raise TypeError("`bmk_ret` must be pd.Series containing benchmark returns")
-#     
-#     # metti insieme le due serie storiche per considerare le stesse date
-#     ts_ret = pd.concat([ret, bmk_ret], axis=1)
-#     # rimuovi NA
-#     ts_ret = ts_ret.fillna(0)
-#     if (len(ts_ret) != len(ret)) or (len(ts_ret) != len(bmk_ret)):
-#         print("Dropping some obs (`ret` and `bmk_ret` do not have the same index)."
-#               " Please check manually if this is okay for you.")
-# 
-#     if use_linear_reg:
-#         # use linear regression to compute beta
-#         # controlla se il codice fa effettivamente quanto richiesto
-#         m = LinearRegression(fit_intercept=True)
-#         if isinstance(ret, pd.Series):
-#             m.fit(ts_ret.iloc[:, [0]], ts_ret.iloc[:, [-1]])
-#             beta = m.coef_[0][0]
-#         else:
-#             if single_reg:
-#                 # fai la regressione singola di ogni stock/ptf vs bmk
-#                 beta = list()
-#                 for icol in range(len(ret.columns)):
-#                     m.fit(ts_ret.iloc[:, [icol]], ts_ret.iloc[:, [-1]])
-#                     beta.append(m.coef_[0][0])
-#             else:
-#                 # usa regressione multipla
-#                 m.fit(ts_ret[:, :-1], ts_ret.iloc[:, [-1]])
-#                 beta = m.coef_[0]
-#     else:
-#         # use variance - covariance
-#         # variance and covariance
-#         m = np.cov(ts_ret, rowvar=False)
-#         variance = m[(m.shape[0] - 1), (m.shape[1] - 1)]
-#         # non considerare la covarianza con il benchmark
-#         covariance = m[:-1, (m.shape[1] - 1)]
-#         beta = covariance / variance
-#     
-#     if isinstance(ret, pd.DataFrame):
-#         beta = pd.Series(beta, index=ret.columns)
-#         
-#     return beta
-    
+def compute_rolling_beta(ret, bmk_ret, window=252):
+    """
+    Computes single-regression beta over a rolling window.    ret = alpha + beta * bmk_ret
+    Works with:
+        (ret is pd.Series or 1 col pd.DataFrame) and (bmk_ret is pd.Series or 1 col pd.DataFrame)
+        ret is pd.DataFrame and (bmk_ret is pd.Series or 1 col pd.DataFrame)
+        (ret is pd.Series or 1 col pd.DataFrame) and bmk_ret is pd.DataFrame
+    https://corporatefinanceinstitute.com/resources/knowledge/finance/beta-coefficient/
+    :param ret: stock/portfolio returns. works with multiple timeseries as well
+    :param bmk_ret: benchmark returns. works with multiple benckmarks
+    :param window: int, lenght of rolling window
+    :return:
+    """
+
+    if not isinstance(ret, (pd.Series, pd.DataFrame)):
+        raise TypeError("`ret` must be pd.Series or pd.DataFrame containing returns")
+    if not isinstance(bmk_ret, (pd.Series, pd.DataFrame)):
+        raise TypeError("`bmk_ret` must be pd.Series or pd.DataFrame containing benchmark returns")
+
+    if isinstance(ret, pd.DataFrame) and isinstance(bmk_ret, pd.DataFrame):
+        if len(ret.columns) > 1 and len(bmk_ret.columns) > 1:
+            raise NotImplementedError("Function cannot process results with `ret` and `bmk_ret` with >1 cols each")
+
+    # inizializza beta come lista
+    beta = list()
+
+    for i in range(window, ret.shape[0]):
+        y = ret.iloc[(i - window):i]
+        x = bmk_ret.iloc[(i - window):i]
+        b = compute_beta(y, x)
+        if isinstance(b, float):
+            # case y is pd.Series and x is pd.Series
+            b = pd.Series(b, index=[y.index.max()])
+        elif isinstance(b, pd.Series):
+            # case y is pd.DataFrame and x is pd.Series
+            b = b.to_frame().transpose()
+            b.index = [y.index.max()]
+        elif isinstance(b, pd.DataFrame):
+            # case y is pd.Series and x is pd.Dataframe
+            b.index = [y.index.max()]
+
+        beta.append(b)
+
+    beta = pd.concat(beta, axis=0)
+
+    return beta
+
 
 def compute_annualized_downside_deviation(returns, benchmark_rate=0):
     """
@@ -631,54 +659,6 @@ def compute_historical_var(returns, conf_lvl=.95):
     return VaR
 
 
-def compute_rolling_corr(ts, df=None, window=252):
-    """
-    compute rolling correlations. if `ts` is pd.Series, then it computes `ts` vs all `df` cols
-    if `ts` is pd.DataFrame and `df` is None, then it computes all pairwise corr between `ts` cols
-    if `ts` is pd.DataFrame and `df` is pd.Series, then it computes all `ts` vs `df`
-    :param ts: pd.Series or pd.DataFrame
-        if pd.Series, then `df` is mandatory and must be pd.Series or pd.DataFrame
-        if pd.DataFrame and `df` is not given, then all pairwise correlations are computed
-        if pd.DataFrame and `df` is pd.Series, then all correlation btw `ts` and `df` are computed
-    :param df: None or pd.Series, pd.DataFrame
-    :param window: int, rolling window
-    """
-
-    if isinstance(ts, pd.Series) and df is None:
-        print("please provide argument `df` (can't be None if `ts` is pd.Series)")
-        return
-
-    if isinstance(ts, pd.Series):
-        if isinstance(df, pd.Series):
-            corr = ts.rolling(window).corr(df).to_frame()
-            corr.columns = [ts.name + "-" + df.name]
-        elif isinstance(df, pd.DataFrame):
-            corr = df.rolling(window).apply(lambda x: x.corr(ts))
-            corr.columns = [ts.name + "-" + col for col in corr.columns]
-
-    if isinstance(ts, pd.DataFrame):
-        if df is None:
-            corr = list()
-            for i in range(len(ts.columns) - 1):
-                for j in range(i + 1, len(ts.columns)):
-                    pair_corr = ts[ts.columns[i]].rolling(window).corr(ts[ts.columns[j]]).to_frame()
-                    pair_corr.columns = [ts.columns[i] + "-" + ts.columns[j]]
-                    corr.append(pair_corr)
-
-            corr = pd.concat(corr, axis=1)
-        elif isinstance(df, pd.Series):
-            corr = list()
-            for i in range(len(ts.columns) - 1):
-                pair_corr = ts[ts.columns[i]].rolling(window).corr(df).to_frame()
-                pair_corr.columns = [ts.columns[i] + "-" + df.name]
-                corr.append(pair_corr)
-
-            corr = pd.concat(corr, axis=1)
-
-    corr = corr.dropna()
-    return corr
-
-
 def compute_corr(ts, df=None):
     """
     computes correlation over all given period
@@ -716,7 +696,8 @@ def compute_corr(ts, df=None):
                     corr.iloc[j, i] = corr.iloc[i, j]
 
         elif isinstance(df, pd.Series):
-            corr = ts.apply(lambda x: x.corr(df), axis=0).reset_index(name="corr")
+            corr = ts.apply(lambda x: x.corr(df), axis=0)
+            corr.name = "corr"
 
         elif isinstance(df, pd.DataFrame):
             corr = list()
@@ -726,6 +707,54 @@ def compute_corr(ts, df=None):
                 corr.append(pair_corr)
             corr = pd.concat(corr, axis=1)
 
+    return corr
+
+
+def compute_rolling_corr(ts, df=None, window=252):
+    """
+    compute rolling correlations. if `ts` is pd.Series, then it computes `ts` vs all `df` cols
+    if `ts` is pd.DataFrame and `df` is None, then it computes all pairwise corr between `ts` cols
+    if `ts` is pd.DataFrame and `df` is pd.Series, then it computes all `ts` vs `df`
+    :param ts: pd.Series or pd.DataFrame
+        if pd.Series, then `df` is mandatory and must be pd.Series or pd.DataFrame
+        if pd.DataFrame and `df` is not given, then all pairwise correlations are computed
+        if pd.DataFrame and `df` is pd.Series, then all correlation btw `ts` and `df` are computed
+    :param df: None or pd.Series, pd.DataFrame
+    :param window: int, rolling window
+    """
+
+    if isinstance(ts, pd.Series) and df is None:
+        print("please provide argument `df` (can't be None if `ts` is pd.Series)")
+        return
+
+    if isinstance(ts, pd.Series):
+        if isinstance(df, pd.Series):
+            corr = ts.rolling(window).corr(df).to_frame()
+            corr.columns = [ts.name + "-" + df.name]
+        elif isinstance(df, pd.DataFrame):
+            corr = df.rolling(window).apply(lambda x: x.corr(ts))
+            corr.columns = [ts.name + "-" + col for col in corr.columns]
+
+    if isinstance(ts, pd.DataFrame):
+        if df is None:
+            corr = list()
+            for i in range(len(ts.columns) - 1):
+                for j in range(i + 1, len(ts.columns)):
+                    pair_corr = ts[ts.columns[i]].rolling(window).corr(ts[ts.columns[j]]).to_frame()
+                    pair_corr.columns = [ts.columns[i] + "-" + ts.columns[j]]
+                    corr.append(pair_corr)
+
+            corr = pd.concat(corr, axis=1)
+        elif isinstance(df, pd.Series):
+            corr = list()
+            for i in range(len(ts.columns)):
+                pair_corr = ts[ts.columns[i]].rolling(window).corr(df).to_frame()
+                pair_corr.columns = [ts.columns[i] + "-" + df.name]
+                corr.append(pair_corr)
+
+            corr = pd.concat(corr, axis=1)
+
+    corr = corr.dropna()
     return corr
 
 
@@ -907,15 +936,20 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
         raise ValueError("`minw` in [0, 1) required")
     if (maxw <= 0) | (maxw > 1):
         raise ValueError("`maxw` in (0, 1] required")
-    if not isinstance(id_col, str):
-        raise TypeError("id_col must be str")
+    if not isinstance(id_col, (str, list)):
+        raise TypeError("id_col must be str or list of str")
+    if isinstance(id_col, list):
+        if not all(isinstance(item, str) for item in id_col):
+            raise TypeError("all elements of id_col must be str")
+    else:
+        id_col = [id_col]
     if not isinstance(w_col, str):
         raise TypeError("w_col must be str")
     if not isinstance(keep_all_cols, bool):
         raise TypeError("keep_all_cols must be boolean")
 
     # check if all needed columns are in holdings
-    required_cols = [id_col, w_col, *groupby]
+    required_cols = [*id_col, w_col, *groupby]
     if not set(required_cols).issubset(set(holdings.columns)):
         raise Exception(f"components must have columns: {id_col}, {w_col}, {groupby}")
 
@@ -937,7 +971,7 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
     if keep_all_cols:
         # mantieni da parte le colonne non necessarie, fai il merge in fondo
         other_cols = list(set(holdings.columns).difference(required_cols))
-        other_cols.append(id_col)
+        other_cols = [*other_cols, *id_col]
         if len(other_cols) > 1:
             df_other_cols = holdings[other_cols]
 
@@ -1036,10 +1070,10 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
     replica = replica[output_cols]
 
     if keep_all_cols:
-        replica = replica.merge(df_other_cols, how="left", on=[id_col])
+        replica = replica.merge(df_other_cols, how="left", on=id_col)
 
-    # drop w_col (corresponds to original index weight), rename "w_replica" to w_col (easier to use later in the script)
-    del replica[w_col]
+    # rename w_col in "Weight_Index", rename "w_replica" to w_col (easier to use later in the script)
+    replica = replica.rename(columns={w_col: "Weight_Original"})
     replica = replica.rename(columns={"w_replica": w_col})
 
     # check if weights respect bounds, if not rebase them
@@ -1227,6 +1261,8 @@ def redistribuite_weights_given_bounds(df, minw=0, maxw=1, w_col="Weight"):
         raise ValueError("`minw` in [0, 1) required")
     if (maxw <= 0) | (maxw > 1):
         raise ValueError("`maxw` in (0, 1] required")
+    if minw > maxw:
+        raise ValueError("minw must be lower than maxw")
 
     # check if bounds are respected
     if (min(df[w_col]) >= minw) & (max(df[w_col]) <= maxw):
@@ -1235,10 +1271,10 @@ def redistribuite_weights_given_bounds(df, minw=0, maxw=1, w_col="Weight"):
 
     # check if operation is feasible
     if sum(df[w_col]) < len(df) * minw:
-        raise ValueError(f"infeasible: sum(df[w_col]) must be >= len(df) * minw ({len(df) * minw:.2%}) "
+        raise ValueError(f"infeasible: sum(df[w_col]) must be >= len(df) * minw ({len(df) * minw:.2%}), "
                          f"it is {sum(df[w_col]):.2%}")
     if sum(df[w_col]) > len(df) * maxw:
-        raise ValueError(f"infeasible: sum(df[w_col]) must be <= len(df) * maxw: ({len(df) * maxw:.2%}) "
+        raise ValueError(f"infeasible: sum(df[w_col]) must be <= len(df) * maxw ({len(df) * maxw:.2%}), "
                          f"it is {sum(df[w_col]):.2%}")
 
     # isolate values not in bound (and on its limits): [0, minw], [maxw, 1]

@@ -43,7 +43,7 @@ class Portfolio(object):
         # usage: print(object)
         ann_ret = pa.compute_cagr(self.ptf_ts)
         ann_std = pa.compute_annualized_volatility(self.ptf_ret)
-        SR = pa.compute_sharpe_ratio(self.ptf_ts, self.benchmark_rate)
+        SR = pa.compute_sharpe_ratio(self.ptf_ret, self.benchmark_rate)
         DD = pa.compute_max_drawdown(self.ptf_ts, self.method)
         VaR = pa.compute_historical_var(self.ptf_ret, conf_lvl=.95)
         return f"""
