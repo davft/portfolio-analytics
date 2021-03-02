@@ -321,6 +321,17 @@ def compute_annualized_volatility(returns):
     return returns.std() * np.sqrt(entries_per_year)
 
 
+def compute_rolling_volatility(returns, window=252):
+    """
+    Wrapper for compute_annualized_volatility. it computes rolling annualized volatility
+    :param returns:
+    :param window:
+    :return:
+    """
+    roll_vol = returns.rolling(window=window).apply(lambda x: compute_annualized_volatility(x))
+    return roll_vol
+
+
 def compute_sharpe_ratio(returns, benchmark_rate=0):
     """
     Calculates the sharpe ratio given a price series. Defaults to benchmark_rate
@@ -423,14 +434,15 @@ def compute_beta(ret, bmk_ret, use_linear_reg=False):
     else:
         # use variance - covariance
         # variance and covariance
-        # serve lavorare su un unico pd.DataFrame
-        tmp = pd.concat([ret, bmk_ret], axis=1)
-        # inserisci zero al posto degli NA
-        # tmp = tmp.fillna(0)
-        # rimuovi gli NA
-        tmp = tmp.dropna()
         for jcol in bmk_ret.columns:
-            m = np.cov(tmp[[*ret.columns, jcol]], rowvar=False)
+            # serve lavorare su un unico pd.DataFrame
+            tmp = pd.concat([ret, bmk_ret[[jcol]]], axis=1)
+            # inserisci zero al posto degli NA
+            # tmp = tmp.fillna(0)
+            # rimuovi gli NA
+            tmp = tmp.dropna()
+            # calcola beta
+            m = np.cov(tmp, rowvar=False)
             variance = m[(m.shape[0] - 1), (m.shape[1] - 1)]
             # non considerare la covarianza con il benchmark
             covariance = m[:-1, (m.shape[1] - 1)]
@@ -724,8 +736,7 @@ def compute_rolling_corr(ts, df=None, window=252):
     """
 
     if isinstance(ts, pd.Series) and df is None:
-        print("please provide argument `df` (can't be None if `ts` is pd.Series)")
-        return
+        raise TypeError("please provide argument `df` (can't be None if `ts` is pd.Series)")
 
     if isinstance(ts, pd.Series):
         if isinstance(df, pd.Series):
