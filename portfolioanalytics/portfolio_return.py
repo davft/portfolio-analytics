@@ -236,10 +236,15 @@ class Portfolio(object):
             # calcola il turnover
             turnover = V_bop.shift(-1).subtract(V)
             turnover = turnover.loc[weights.index]
-            turnover = turnover.apply(lambda x: np.sum(np.abs(x)), axis=1).divide(ptf.loc[weights.index])
+            # old approach: divided by EOP ptf value
+            # turnover = turnover.apply(lambda x: np.sum(np.abs(x)), axis=1).divide(ptf.loc[weights.index])
+            # new approach: divided by average ptf value
+            # denominator: average portfolio value btw rebalancing dates
+            avg_ptf = self.get_avg_ptf_value(ptf, weights)
+            turnover = turnover.apply(lambda x: np.sum(np.abs(x)), axis=1).divide(avg_ptf)
             # secondo la definizione di cui sopra, il massimo turnover è 2. se modifichiamo l'allocazione dell'intero
             # ptf vogliamo turnover=1
-            turnover = turnover / 2
+            # turnover = turnover / 2
             return ptf_ret, ptf, contrib, turnover, V, V_bop
 
         return ptf_ret, ptf
@@ -273,6 +278,27 @@ class Portfolio(object):
         last_w_eop = w_eop.iloc[[-1]]
 
         return last_w_eop
+
+    def get_avg_ptf_value(self, ptf, weights):
+        """
+        Computes average portfolio value between each rebalancing date.
+        Output used for computing portfolio turnover (denominator)
+        :param ptf: pd.Series containing ptf values
+        :param weights: pd.DataFrame with index = rebalancing dates
+        :return:
+        """
+        rebald = weights.index
+
+        avg_ptf = list()
+        for i in range(len(rebald)):
+            if i == 0:
+                avg_ptf.append(pd.Series(self.V0, index=[rebald[i]]))
+            else:
+                tmp = ptf.loc[(ptf.index > rebald[i - 1]) & (ptf.index <= rebald[i])]
+                avg_ptf.append(pd.Series(np.mean(tmp), index=[rebald[i]]))
+
+        avg_ptf = pd.concat(avg_ptf, axis=0)
+        return avg_ptf
         
         
 

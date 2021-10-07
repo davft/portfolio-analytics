@@ -2,20 +2,46 @@
 
 import pandas as pd
 import numpy as np
+import numpy_financial as npf
 from sklearn.linear_model import LinearRegression
 from scipy.stats import norm
 from scipy.optimize import root_scalar
 import warnings
 import datetime
+import matplotlib.pyplot as plt
 # https://stackoverflow.com/questions/16004076/python-importing-a-module-that-imports-a-module
 from . import dates as dt
 
 
-def rebase_ts(prices, level=100):
+def compute_irr(T=10, S0=1000, monthly_s=100, F=20000, verbose=False):
+    """
+    compute required IRR to match investment expectation
+    :param T: int or float, in 1/12 of month (es 10.5 for 10y6m). Time period in year
+    :param S0: initial invested amount
+    :param monthly_s: monthly investment
+    :param F: final amount
+    :return: required IRR to meet investment expectation
+    """
+
+    # number of periods
+    M = 12  # frequency, monthly
+    n_periods = round(T * M) - 1
+
+    IRR = npf.irr([-(S0 + monthly_s), *[-monthly_s for _ in range(n_periods - 1)], F])
+    IRR_yearly = (1 + IRR) ** M - 1
+    
+    if verbose:
+        print(f"Total investment: {S0 + n_periods * monthly_s:,.2f}, "
+              f"required annual rate of return to get {F:,.2f}: {IRR_yearly:.2%}")
+
+    return IRR_yearly
+
+
+def rebase_ts(prices, V0=100):
     """
     rebases prices time series to V0
     :param prices: pd.Series or pd.DataFrame
-    :param level: rebase to level
+    :param V0: rebase to level V0
     """
     if not isinstance(prices, (pd.Series, pd.DataFrame)):
         raise TypeError("`prices` must be either pd.Series or pd.DataFrame")
@@ -27,7 +53,7 @@ def rebase_ts(prices, level=100):
         else:
             ts = prices
 
-        ts_rebased = ts / ts.iloc[0] * level
+        ts_rebased = ts / ts.iloc[0] * V0
 
     else:
         # case 2: isinstance(prices, pd.DataFrame)
@@ -36,15 +62,29 @@ def rebase_ts(prices, level=100):
             ts_rebased = list()
             for col in prices.columns:
                 ts = prices[col].dropna()
-                ts_rebased.append(ts / ts.iloc[0] * level)
+                ts_rebased.append(ts / ts.iloc[0] * V0)
             ts_rebased = pd.concat(ts_rebased, axis=1)
         else:
-            ts_rebased = prices / prices.iloc[0] * level
+            ts_rebased = prices / prices.iloc[0] * V0
 
     # nel caso in cui ci siano NaN, la serie storica in output potrebbe avere un indice diverso rispetto a prices
     ts_rebased = ts_rebased.reindex(prices.index)
 
     return ts_rebased
+
+
+def yield_to_ts(yields, V0=100):
+    """
+    Computes timeseries starting from yield values. Uses ACT/360.
+    :param yields:
+    :param V0:
+    :return:
+    """
+    elapsed_days = yields.index.to_series().diff().dt.days.fillna(0)
+    returns = (1 + yields / 100).pow(elapsed_days / 360, axis=0) - 1
+    ts = compute_ts(returns, V0=V0)
+
+    return ts
 
 
 def compute_returns(prices, method="simple"):
@@ -116,7 +156,7 @@ def change_freq_ts(prices, freq="monthly"):
     if isinstance(freq, str):
         freq = freq.lower()
         if freq not in ["weekly", "w", "monthly", "m", "yearly", "y"]:
-            raise ValueError("`freq` can be: 'weekly', 'monthly', 'yearly', or 'w', 'm', 'y'")
+            raise ValueError("`freq` can be: 'weekly', 'monthly', 'yearly' (or 'w', 'm', 'y')")
     else:
         raise TypeError("`freq` must be str")
 
@@ -161,12 +201,12 @@ def bootstrap_ts(ret, samples, index_dates=None):
         return bootstrap_ts(ret, samples=samples, index_dates=index_dates)
     elif isinstance(samples, tuple):
         # nel caso in cui venga passata una tupla più lunga di due, prendi solo i primi due elementi
-        samples = np.random.choice(range(len(ret)), size=samples[0:2])
+        samples = np.random.choice(range(len(ret)), size=samples[:2])
         return bootstrap_ts(ret, samples=samples, index_dates=index_dates)
     else:
-        raise Exception(f"samples must be int or np.array")
+        raise Exception(f"samples must be int, tuple or np.array")
 
-    # add zeros as first obs to compute prices time series easly later
+    # add zeros as first obs to compute prices time series easily later
     if isinstance(sim_ret, pd.Series):
         sim_ret = pd.concat([pd.Series(0), sim_ret])
     elif isinstance(sim_ret, pd.DataFrame):
@@ -186,6 +226,111 @@ def bootstrap_ts(ret, samples, index_dates=None):
             print(f"Dates not added as index")
 
     return sim_ret
+
+
+def bootstrap_plot(ret, T=30, I=500, init_investm=1000, monthly_investm=None, oneoff_investm=None, seed=None):
+    """
+
+    :param ret: pd.Series with returns
+    :param T: years to simulate
+    :param I: number of simulations
+    :param init_investm: int, initial investment
+    :param monthly_investm: int, monthly investment
+    :param oneoff_investm: int, one-off investment
+    :return: plot
+    """
+
+    assert isinstance(ret, pd.Series), "ret must be pd.Series"
+    assert isinstance(init_investm, (int, float)), "init_investm must be int"
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    # number of periods in each year
+    M = 12
+    # dates to simulate
+    sim_dates = pd.bdate_range(ret.index.max(), "2100-12-31", freq="M")
+    # select only the needed simulation dates
+    sim_dates = sim_dates[:(T * M)]
+
+    # sample length
+    K = len(sim_dates) - 1
+
+    # bootstrap
+    ret_bs = bootstrap_ts(ret, samples=(K, I), index_dates=sim_dates)
+    # compute time-series from bootstrapped returns
+    ts_bs = compute_ts(ret_bs, V0=init_investm)
+
+    # compute mean
+    mean_ts = ts_bs.mean(axis=1)
+    # compute std
+    std_ts = ts_bs.std(axis=1)
+
+    cagr = compute_cagr(mean_ts)
+    all_period_ret = compute_allperiod_returns(mean_ts)
+    
+    tot_investm = init_investm
+    final_value = mean_ts.iloc[-1]
+
+    if oneoff_investm is not None:
+        # oneoff_ts_bs = compute_ts(ret_bs, V0=oneoff_investm)
+        # mean_oneoff = oneoff_ts_bs.mean(axis=1)
+        # mean_oneoff = rebase_ts(mean_ts, V0=oneoff_investm)
+        oneoff_ts = rebase_ts(ts_bs, V0=oneoff_investm)
+        oneoff_ts = ts_bs.add(oneoff_ts, fill_value=0)
+        mean_oneoff = oneoff_ts.mean(axis=1)
+        std_oneoff = oneoff_ts.std(axis=1)
+        cagr = compute_cagr(mean_oneoff)
+        all_period_ret = compute_allperiod_returns(mean_oneoff)
+        tot_investm += oneoff_investm
+        final_value = mean_oneoff.iloc[-1]
+    
+    if monthly_investm is not None:
+        for dd in sim_dates[:-1]:  # non considerare l'ultima data
+            # m_ts_bs = compute_ts(ret_bs.loc[ret_bs.index >= dd], V0=monthly_investm)
+            # mean_tmp = rebase_ts(mean_ts.loc[mean_ts.index >= dd], V0=monthly_investm)
+            mean_tmp = rebase_ts(ts_bs.loc[mean_ts.index >= dd], V0=monthly_investm)
+            try:
+                monthly_ts = monthly_ts.add(mean_tmp, fill_value=0)
+            except:
+                monthly_ts = mean_tmp.copy()
+
+        # mean_monthly = monthly_ts.mean(axis=1)
+        monthly_ts = ts_bs.add(monthly_ts, fill_value=0)
+        std_monthly = monthly_ts.std(axis=1)
+
+        mean_monthly = monthly_ts.mean(axis=1)
+        # per il calcolo del CAGR bisogna tenere in considerazione tutti gli investimenti
+        final_value = mean_monthly.iloc[-1]
+        cagr = compute_irr(T=T, S0=tot_investm, monthly_s=monthly_investm, F=final_value)
+        # cagr = compute_cagr(mean_monthly)
+        all_period_ret = (1 + cagr) ** T - 1
+        tot_investm += monthly_investm * (len(sim_dates) - 1)
+        
+
+    # plot
+    fig, ax = plt.subplots()
+    ax.plot(mean_ts.index, mean_ts, label=f"Investment: {init_investm:,.0f}")
+    if oneoff_investm is not None:
+        ax.plot(mean_oneoff.index, mean_oneoff, "r", label=f"Adding one-off investment: {oneoff_investm:,.0f}")
+        ax.fill_between(mean_oneoff.index, mean_oneoff - .2 * std_oneoff, mean_oneoff + .2 * std_oneoff, alpha=.5)
+        ax.fill_between(mean_oneoff.index, mean_oneoff - .5 * std_oneoff, mean_oneoff + .5 * std_oneoff, alpha=.3)
+        ax.fill_between(mean_oneoff.index, mean_oneoff - std_oneoff, mean_oneoff + std_oneoff, alpha=.1)
+    elif monthly_investm is not None:
+        ax.plot(mean_monthly.index, mean_monthly, "r", label=f"With monthly investment: {monthly_investm:,.0f}")
+        ax.fill_between(mean_monthly.index, mean_monthly - .2 * std_monthly, mean_monthly + .2 * std_monthly, alpha=.5)
+        ax.fill_between(mean_monthly.index, mean_monthly - .5 * std_monthly, mean_monthly + .5 * std_monthly, alpha=.3)
+        ax.fill_between(mean_monthly.index, mean_monthly - std_monthly, mean_monthly + std_monthly, alpha=.1)
+    else:
+        ax.fill_between(mean_ts.index, mean_ts - 0.2 * std_ts, mean_ts + 0.2 * std_ts, alpha=0.5)
+        ax.fill_between(mean_ts.index, mean_ts - 0.5 * std_ts, mean_ts + 0.5 * std_ts, alpha=0.3)
+        ax.fill_between(mean_ts.index, mean_ts - std_ts, mean_ts + std_ts, alpha=0.1)
+    plt.title(f"{ret.name} {T} years Projection.\n"
+              f"CAGR: {cagr:.2%}, overall return: {all_period_ret:.2%}.\n"
+              f"Total investment: {tot_investm:,.0f}, Final value: {final_value:,.0f}")
+    ax.legend()
+    
+    return fig
 
 
 def compute_excess_return(ts, bmk_ts):
@@ -650,7 +795,7 @@ def compute_calmar_ratio(prices, years_past=3, method="simple"):
 
 def compute_parametric_var(returns, conf_lvl=.95):
     """
-    :param returns
+    :param returns pd.Series or pd.DataFrame
     :param conf_lvl: float, confidence level
     ref: https://blog.quantinsti.com/calculating-value-at-risk-in-excel-python/
     """
@@ -658,16 +803,23 @@ def compute_parametric_var(returns, conf_lvl=.95):
     sigma = np.std(returns)
 
     VaR = norm.ppf(1 - conf_lvl, mu, sigma)
+    
+    if isinstance(returns, pd.DataFrame):
+        VaR = pd.Series(VaR, index=returns.columns, name="Parametric VaR")
+    
     return VaR
 
 
 def compute_historical_var(returns, conf_lvl=.95):
     """
-    :param returns
+    :param returns pd.Series or pd.DataFrame
     :param conf_lvl: float, confidence level
     ref: https://blog.quantinsti.com/calculating-value-at-risk-in-excel-python/
     """
     VaR = returns.quantile(1 - conf_lvl)
+    if isinstance(returns, pd.DataFrame):
+        VaR.name = "Historical VaR"
+
     return VaR
 
 
@@ -737,6 +889,14 @@ def compute_rolling_corr(ts, df=None, window=252):
 
     if isinstance(ts, pd.Series) and df is None:
         raise TypeError("please provide argument `df` (can't be None if `ts` is pd.Series)")
+
+    if isinstance(ts, pd.DataFrame) and len(ts.columns) == 1:
+        # if ts is pd.DataFrame with 1 col, convert to pd.Series
+        ts = ts[ts.columns[0]]
+
+    if isinstance(df, pd.DataFrame) and len(df.columns) == 1:
+        # if df is pd.DataFrame with 1 col, convert to pd.Series
+        df = df[df.columns[0]]
 
     if isinstance(ts, pd.Series):
         if isinstance(df, pd.Series):
@@ -894,7 +1054,10 @@ def compute_turnover(hldg, index="Date", columns="ISIN", values="w_rebase"):
     for i in range(len(hh)):
         if i == 0:
             continue
-        turnover_i.append(np.sum(np.abs(hh.iloc[i] - hh.iloc[i - 1])) / 2)
+        # secondo la definizione di cui sopra, il massimo turnover è 2. se modifichiamo l'allocazione dell'intero
+        # ptf vogliamo turnover=1
+        # turnover_i.append(np.sum(np.abs(hh.iloc[i] - hh.iloc[i - 1])) / 2)
+        turnover_i.append(np.sum(np.abs(hh.iloc[i] - hh.iloc[i - 1])))
     
     turnover = pd.Series(turnover_i, index=hh.index[1:])
 
@@ -973,11 +1136,11 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
         x = df[col].values
         # https://stackoverflow.com/questions/2361426/get-the-first-item-from-an-iterable-that-matches-a-condition
         cut_idx = next((i for i, y in enumerate(x) if y > lvl), 1)
-        return df.iloc[0:cut_idx]
+        return df.iloc[:cut_idx]
 
     if rebase is not None:
         # rebase weights
-        holdings[w_col] = holdings[w_col] / (holdings[w_col].sum() * rebase)
+        holdings[w_col] = holdings[w_col] / holdings[w_col].sum() * rebase
 
     if keep_all_cols:
         # mantieni da parte le colonne non necessarie, fai il merge in fondo
@@ -1020,7 +1183,7 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
         replica = hldg.dropna()
         # select first n_stock for each cells
         # select first x.shape[0] if n_stock > x.shape[0]
-        replica = replica.groupby(groupby).apply(lambda x: x.iloc[0:min(int(x["n_stocks"].unique()), x.shape[0])])
+        replica = replica.groupby(groupby).apply(lambda x: x.iloc[:min(int(x["n_stocks"].unique()), x.shape[0])])
         replica = replica.reset_index(drop=True)
 
     else:
@@ -1162,7 +1325,7 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
 
 
     # se c'è GOOGL US (US02079K3059) rimuovi GOOG US (US02079K1079)
-    if "US02079K3059" in hldg[id_col]:
+    if "US02079K3059" in hldg[id_col].values:
         hldg = hldg[hldg[id_col] != "US02079K1079"]
 
     # sort by groupby and weight, ascending order for groupby and descending for weight
@@ -1194,6 +1357,63 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
     replica = replica[output_cols]
 
     return replica
+
+
+def redistribuite_weights_given_bounds(df, minw=0, maxw=1, w_col="Weight"):
+    """
+    Check if weights in df respect bounds [minw, maxw]. if yes return df
+    If not, squeeze distribution (if possibile) to make weights respect bounds
+    :param df: pd.DataFrame, containing at least w_col column
+    :param minw: float [0, 1)
+    :param maxw: float (0, 1]
+    :param w_col: str, name of column containing weights
+    :return:
+    """
+
+    assert isinstance(df, pd.DataFrame), "`df` must be pd.DataFrame"
+    assert isinstance(minw, (int, float)), "`minw` must be float"
+    assert isinstance(maxw, (int, float)), "`maxw` must be float"
+    assert isinstance(w_col, str), "`w_col` must be str"
+    if (minw < 0) | (minw >= 1):
+        raise ValueError("`minw` in [0, 1) required")
+    if (maxw <= 0) | (maxw > 1):
+        raise ValueError("`maxw` in (0, 1] required")
+    if minw > maxw:
+        raise ValueError("minw must be lower than maxw")
+
+    # check if bounds are respected
+    if (min(df[w_col]) >= minw) & (max(df[w_col]) <= maxw):
+        # if yes, no adjustment needed
+        return df
+
+    # check if operation is feasible
+    if sum(df[w_col]) < len(df) * minw:
+        raise ValueError(f"infeasible: sum(df[w_col]) must be >= len(df) * minw ({len(df) * minw:.2%}), "
+                         f"it is {sum(df[w_col]):.2%}")
+    if sum(df[w_col]) > len(df) * maxw:
+        raise ValueError(f"infeasible: sum(df[w_col]) must be <= len(df) * maxw ({len(df) * maxw:.2%}), "
+                         f"it is {sum(df[w_col]):.2%}")
+
+    # isolate values not in bound (and on its limits): [0, minw], [maxw, 1]
+    out_bound = df[(df[w_col] <= minw) | (df[w_col] >= maxw)]
+    while len(out_bound[(out_bound[w_col] < minw) | (out_bound[w_col] > maxw)]):
+        # compute how much weight you need to redistribuite across obs in bounds
+        # 1. weight needed to bring values below minw to minw (negative quantity)
+        excess_w = sum(out_bound[out_bound[w_col] < minw][w_col]) - len(out_bound[out_bound[w_col] < minw]) * minw
+        # 2. excess weight you get from bringing values above maxw to maxw (positive quantity)
+        excess_w += sum(out_bound[out_bound[w_col] > maxw][w_col]) - len(out_bound[out_bound[w_col] > maxw]) * maxw
+        # floor weights to minw and cap to maxw
+        out_bound[w_col] = out_bound[w_col].clip(minw, maxw)
+
+        btw_bound = df[(df[w_col] > minw) & (df[w_col] < maxw)]
+        btw_bound[w_col] = btw_bound[w_col] + btw_bound[w_col] / sum(btw_bound[w_col]) * excess_w
+
+        # override df with the new weights
+        df = pd.concat([btw_bound, out_bound], axis=0)
+        # isolate again values not in bound to repeat the cycle if needed
+        out_bound = df[(df[w_col] <= minw) | (df[w_col] >= maxw)]
+
+    return df
 
 
 def compute_groupby_difference(hldg, bmk_hldg, groupby="GICS Sector", w_col="Weight"):
@@ -1253,58 +1473,3 @@ def get_ew_weights(ptf, groupby=("data_val", "index_ticker"), on="ticker", index
     return ew_weights
 
 
-def redistribuite_weights_given_bounds(df, minw=0, maxw=1, w_col="Weight"):
-    """
-    Check if weights in df respect bounds [minw, maxw]. if yes return df
-    If not, squeeze distribution (if possibile) to make weights respect bounds
-    :param df: pd.DataFrame, containing at least w_col column
-    :param minw: float [0, 1)
-    :param maxw: float (0, 1]
-    :param w_col: str, name of column containing weights
-    :return:
-    """
-
-    assert isinstance(df, pd.DataFrame), "`df` must be pd.DataFrame"
-    assert isinstance(minw, (int, float)), "`minw` must be float"
-    assert isinstance(maxw, (int, float)), "`maxw` must be float"
-    assert isinstance(w_col, str), "`w_col` must be str"
-    if (minw < 0) | (minw >= 1):
-        raise ValueError("`minw` in [0, 1) required")
-    if (maxw <= 0) | (maxw > 1):
-        raise ValueError("`maxw` in (0, 1] required")
-    if minw > maxw:
-        raise ValueError("minw must be lower than maxw")
-
-    # check if bounds are respected
-    if (min(df[w_col]) >= minw) & (max(df[w_col]) <= maxw):
-        # if yes, no adjustment needed
-        return df
-
-    # check if operation is feasible
-    if sum(df[w_col]) < len(df) * minw:
-        raise ValueError(f"infeasible: sum(df[w_col]) must be >= len(df) * minw ({len(df) * minw:.2%}), "
-                         f"it is {sum(df[w_col]):.2%}")
-    if sum(df[w_col]) > len(df) * maxw:
-        raise ValueError(f"infeasible: sum(df[w_col]) must be <= len(df) * maxw ({len(df) * maxw:.2%}), "
-                         f"it is {sum(df[w_col]):.2%}")
-
-    # isolate values not in bound (and on its limits): [0, minw], [maxw, 1]
-    out_bound = df[(df[w_col] <= minw) | (df[w_col] >= maxw)]
-    while len(out_bound[(out_bound[w_col] < minw) | (out_bound[w_col] > maxw)]):
-        # compute how much weight you need to redistribuite across obs in bounds
-        # 1. weight needed to bring values below minw to minw (negative quantity)
-        excess_w = sum(out_bound[out_bound[w_col] < minw][w_col]) - len(out_bound[out_bound[w_col] < minw]) * minw
-        # 2. excess weight you get from bringing values above maxw to maxw (positive quantity)
-        excess_w += sum(out_bound[out_bound[w_col] > maxw][w_col]) - len(out_bound[out_bound[w_col] > maxw]) * maxw
-        # floor weights to minw and cap to maxw
-        out_bound[w_col] = out_bound[w_col].clip(minw, maxw)
-
-        btw_bound = df[(df[w_col] > minw) & (df[w_col] < maxw)]
-        btw_bound[w_col] = btw_bound[w_col] + btw_bound[w_col] / sum(btw_bound[w_col]) * excess_w
-
-        # override df with the new weights
-        df = pd.concat([btw_bound, out_bound], axis=0)
-        # isolate again values not in bound to repeat the cycle if needed
-        out_bound = df[(df[w_col] <= minw) | (df[w_col] >= maxw)]
-
-    return df
