@@ -776,20 +776,21 @@ def compute_max_drawdown(prices, method="simple"):
     return compute_drawdown_series(prices, method=method).min()
 
 
-def compute_calmar_ratio(prices, years_past=3, method="simple"):
+def compute_calmar_ratio(prices, years_past=None, method="simple"):
     """
     Return the percent max drawdown ratio over the past n years, otherwise
     known as the Calmar Ratio (3yr)
     """
 
-    # Filter series on past three years
-    last_date = prices.index[-1]
-    n_years_ago = last_date - pd.Timedelta(days=years_past * 365.25)
-    series = prices[prices.index > n_years_ago]
+    if isinstance(years_past, int):
+        # Filter series on past three years
+        last_date = prices.index[-1]
+        n_years_ago = last_date - pd.Timedelta(days=years_past * 365.25)
+        prices = prices[prices.index > n_years_ago]
 
     # Compute annualized percent max drawdown ratio
-    percent_drawdown = -compute_max_drawdown(series, method=method)
-    cagr = compute_cagr(series)
+    percent_drawdown = -compute_max_drawdown(prices, method=method)
+    cagr = compute_cagr(prices)
     return cagr / percent_drawdown
 
 
@@ -802,6 +803,7 @@ def compute_parametric_var(returns, conf_lvl=.95):
     mu = np.mean(returns)
     sigma = np.std(returns)
 
+    # Percent Point Function
     VaR = norm.ppf(1 - conf_lvl, mu, sigma)
     
     if isinstance(returns, pd.DataFrame):
@@ -1064,6 +1066,55 @@ def compute_turnover(hldg, index="Date", columns="ISIN", values="w_rebase"):
     return turnover
 
 
+# PRINT NICE STATISTICS
+def print_stats(ts, line_length=50):
+    """
+    given pd.Series or pd.DataFrame of time-series (prices), prints statistics
+    :param ts: ts.index must contain dates
+    :param line_length: int, lenght of line print
+    :return:
+    """
+    if isinstance(ts, pd.Series):
+        is_series = True
+    elif isinstance(ts, pd.DataFrame):
+        is_series = False
+    else:
+        raise TypeError(f"ts must be pd.Series, pd.DataFrame.")
+
+    # compute returns
+    ret = compute_returns(ts)
+
+    def _nice(line, length=50):
+        # print nice line given lenght.
+        assert isinstance(line, str)
+        if line[:2] != "# ":
+            line = "# " + line
+        print(f"{line}{' ' * max(0, (length - len(line) - 2))} #")
+
+    print("#" * line_length)
+    if is_series:
+        _nice(f"Timeseries: {ts.name}", line_length)
+    else:
+        _nice(f"Timeseries: {', '.join(ts.columns)}", line_length)
+    _nice(f"# Period: {ts.index.min().strftime('%Y-%m-%d')} - {ts.index.max().strftime('%Y-%m-%d')}", line_length)
+    print("#" * line_length)
+    if is_series:
+        _nice(f"CAGR: {compute_cagr(ts):.2%}", line_length)
+        _nice(f"All period return: {compute_allperiod_returns(ts):.2%}", line_length)
+        _nice(f"Volatility: {compute_annualized_volatility(ret):.2%}", line_length)
+        _nice(f"Sharpe Ratio: {compute_sharpe_ratio(ret):.2}", line_length)
+        _nice(f"Sortino Ratio: {compute_sortino_ratio(ts):.2}", line_length)
+        _nice(f"Calmar Ratio: {compute_calmar_ratio(ts):.2}", line_length)
+        _nice(f"Max Drawdown: {compute_max_drawdown(ts):.2%}", line_length)
+        _nice(f"Parametric 95% VaR: {compute_parametric_var(ret):.2%}", line_length)
+        _nice(f"Historical 95% VaR: {compute_historical_var(ret):.2%}", line_length)
+
+        print("#" * line_length)
+    else:
+        _nice(f"That's all for now folks")
+        print("#" * line_length)
+
+
 # REPLICA
 def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_coverage=.85, groupby_coverage=None,
                             threshold=.02, rebase=1, minw=0, maxw=1, id_col="isin", w_col="w", keep_all_cols=True):
@@ -1260,7 +1311,7 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
 
 
 def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="weight", id_col="ISIN",
-                        equally_weighted=True, rebase=1.):
+                        equally_weighted=True, rebase=1., use_scipy=True):
     """
     Replica di un index/ETF/ptf utilizzando la metodologia di Lux:
         - aggregazione per le colonne indicate in groupby
@@ -1278,6 +1329,9 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
     :param id_col: str, nome della colonna contenete ISIN, ticker, CUSIP (identifier degli strumenti)
     :param equally_weighted: boolean. if False, distribuisci i pesi in base al peso iniziale in hldg
     :param rebase: int/float or None. if None, do not rebase. if not None, rebase to value of rebase
+    :param use_scipy: boolean, which method to use to find N_fittizio.
+        if True uses scipy.optimize.root_scalar()
+        if False uses function implemented in MySQL (while loop)
     :return: replica, pd.DataFrame
     """
 
@@ -1311,18 +1365,23 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
         if not {*groupby, "w_groupby"}.issubset(agg.columns):
             raise Exception(f"`agg` must have columns: {groupby}, w_groupby")
 
-    def find_N_fittizio(x, agg, N):
-        N_tmp = [round(x * y, 0) for y in agg["w_groupby"]]
-        return sum(N_tmp) - N
+    if use_scipy:
+        # scipy.optimize.root_scalar()
+        def find_N_fittizio(x, series, N):
+            return sum([round(x * y, 0) for y in series]) - N
 
-    N_fittizio = root_scalar(find_N_fittizio, args=(agg, N), bracket=[0, N + 50], x0=N).root
+        N_fittizio = root_scalar(find_N_fittizio, args=(agg["w_groupby"], N), bracket=[0, N + 50], x0=N).root
+    else:
+        # while-loop to find the minimum integer which gives at least N stocks
+        N_fittizio = N
+        while sum([round(N_fittizio * x, 0) for x in agg["w_groupby"]]) < N:
+            N_fittizio += 1
 
     # calcola il numero di stock che vanno selezionate per ogni combinazione groupby
     agg["n_stocks"] = [int(round(N_fittizio * x, 0)) for x in agg["w_groupby"]]
     
     # rimuovi le combinazioni con 0 stock
     agg = agg[agg["n_stocks"] != 0]
-
 
     # se c'è GOOGL US (US02079K3059) rimuovi GOOG US (US02079K1079)
     if "US02079K3059" in hldg[id_col].values:
@@ -1342,7 +1401,12 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
     # set replica weights
     if equally_weighted:
         # calcola il peso (equally weighted) di ogni stock all'interno del groupby
-        agg["w_stock"] = agg["w_groupby"] / agg["n_stocks"]
+        # appoggiati al numero di titoli effettivo
+        tmp = replica.groupby(groupby).size().reset_index(name="real_n_stocks")
+        agg = agg.merge(tmp, how="left", on=groupby)
+        agg["w_stock"] = agg["w_groupby"] / agg["real_n_stocks"]
+        # agg["w_stock"] = agg["w_groupby"] / agg["n_stocks"]
+
         # aggiungi colonna contente il peso di ogni combinazione groupby
         replica = replica.merge(agg[[*groupby, "w_stock"]], how="left", on=groupby)
         replica["w_replica"] = replica["w_stock"]
@@ -1351,7 +1415,6 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
         replica = replica.merge(agg[[*groupby, "w_groupby"]], how="left", on=groupby)
         replica["w_replica"] = \
             replica.groupby(groupby).apply(lambda x: x[w_col] / x[w_col].sum() * x["w_groupby"]).values
-
 
     output_cols = [id_col, w_col, *groupby, "w_replica"]
     replica = replica[output_cols]
@@ -1396,6 +1459,7 @@ def redistribuite_weights_given_bounds(df, minw=0, maxw=1, w_col="Weight"):
 
     # isolate values not in bound (and on its limits): [0, minw], [maxw, 1]
     out_bound = df[(df[w_col] <= minw) | (df[w_col] >= maxw)]
+    out_bound = out_bound.copy()
     while len(out_bound[(out_bound[w_col] < minw) | (out_bound[w_col] > maxw)]):
         # compute how much weight you need to redistribuite across obs in bounds
         # 1. weight needed to bring values below minw to minw (negative quantity)
@@ -1403,9 +1467,10 @@ def redistribuite_weights_given_bounds(df, minw=0, maxw=1, w_col="Weight"):
         # 2. excess weight you get from bringing values above maxw to maxw (positive quantity)
         excess_w += sum(out_bound[out_bound[w_col] > maxw][w_col]) - len(out_bound[out_bound[w_col] > maxw]) * maxw
         # floor weights to minw and cap to maxw
-        out_bound[w_col] = out_bound[w_col].clip(minw, maxw)
+        out_bound.loc[:, w_col] = out_bound[w_col].clip(minw, maxw)
 
         btw_bound = df[(df[w_col] > minw) & (df[w_col] < maxw)]
+        btw_bound = btw_bound.copy()
         btw_bound[w_col] = btw_bound[w_col] + btw_bound[w_col] / sum(btw_bound[w_col]) * excess_w
 
         # override df with the new weights
