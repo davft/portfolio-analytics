@@ -1,5 +1,6 @@
 # https://github.com/chrisconlan/algorithmic-trading-with-python/blob/master/src/pypm/metrics.py
 
+import math
 import pandas as pd
 import numpy as np
 import numpy_financial as npf
@@ -356,32 +357,35 @@ def compute_excess_return(ts, bmk_ts):
     return excess_return
 
 
-def compute_tracking_error_vol(ts, bmk_ts):
+def compute_tracking_error_vol(ret, bmk_ret):
     """
     compute tracking error volatility wrt a benchmark timeseries
     input MUST be returns time-series
-    :param ts: pd.Series or pd.DataFrame (returns)
-    :param bmk_ts: pd.Series or pd.DataFrame with benchmark(s) returns
+    :param ret: pd.Series or pd.DataFrame (returns)
+    :param bmk_ret: pd.Series or pd.DataFrame with benchmark(s) returns
     """
-    if not isinstance(ts, (pd.Series, pd.DataFrame)):
-        print("`ts` must be pd.Series or pd.DataFrame")
+    if not isinstance(ret, (pd.Series, pd.DataFrame)):
+        print("`ret` must be pd.Series or pd.DataFrame")
         return
-    if not isinstance(bmk_ts, (pd.Series, pd.DataFrame)):
-        print("`bmk_ts` must be pd.Series or pd.DataFrame")
+    if not isinstance(bmk_ret, (pd.Series, pd.DataFrame)):
+        print("`bmk_ret` must be pd.Series or pd.DataFrame")
         return
     
-    if isinstance(bmk_ts, pd.Series):
-        excess_return = compute_excess_return(ts=ts, bmk_ts=bmk_ts)
+    if isinstance(bmk_ret, pd.Series):
+        excess_return = compute_excess_return(ts=ret, bmk_ts=bmk_ret)
         tev = compute_annualized_volatility(excess_return)
-        if isinstance(ts, pd.DataFrame):
+        if isinstance(ret, pd.DataFrame):
             tev.name = "tev"
 
-    elif isinstance(bmk_ts, pd.DataFrame):
+    elif isinstance(bmk_ret, pd.DataFrame):
         tev = list()
-        for i in range(len(bmk_ts.columns)):
-            excess_return = compute_excess_return(ts=ts, bmk_ts=bmk_ts[bmk_ts.columns[i]])
+        for col in bmk_ret.columns:
+            excess_return = compute_excess_return(ts=ret, bmk_ts=bmk_ret[col])
             pair_tev = compute_annualized_volatility(excess_return)
-            pair_tev.name = bmk_ts.columns[i]
+            if isinstance(ret, pd.DataFrame):
+                pair_tev.name = col
+            else:
+                pair_tev = pd.Series(pair_tev, name=col)
             tev.append(pair_tev)
 
         tev = pd.concat(tev, axis=1)
@@ -726,7 +730,7 @@ def compute_sortino_ratio(prices, benchmark_rate=0):
     """
     cagr = compute_cagr(prices)
     return_series = compute_returns(prices)
-    downside_deviation = compute_annualized_downside_deviation(return_series)
+    downside_deviation = compute_annualized_downside_deviation(return_series, benchmark_rate)
     return (cagr - benchmark_rate) / downside_deviation
 
 
@@ -779,7 +783,7 @@ def compute_max_drawdown(prices, method="simple"):
 def compute_calmar_ratio(prices, years_past=None, method="simple"):
     """
     Return the percent max drawdown ratio over the past n years, otherwise
-    known as the Calmar Ratio (3yr)
+    known as the Calmar Ratio (3yr). if years_past is None, then consider all period.
     """
 
     if isinstance(years_past, int):
@@ -931,6 +935,36 @@ def compute_rolling_corr(ts, df=None, window=252):
     return corr
 
 
+def compute_spread_ts(ts1, ts2, rebase=True):
+    """
+    Computes spread difference between two prices time-series
+    :param ts1: price time-series
+    :param ts2:
+    :return:
+    """
+    if rebase:
+        ts1 = rebase_ts(ts1)
+        ts2 = rebase_ts(ts2)
+
+    out = ts1 - ts2
+    return out
+
+
+def compute_ratio_ts(ts1, ts2, rebase=True):
+    """
+    Computes ratio between two prices time-series
+    :param ts1: price time-series
+    :param ts2:
+    :return:
+    """
+    if rebase:
+        ts1 = rebase_ts(ts1)
+        ts2 = rebase_ts(ts2)
+
+    out = ts1 / ts2
+    return out
+
+
 def compute_summary_statistics(ts, return_annualized=True):
     """
     Computes statistics (annualised return and annualised std) for various time-frame
@@ -1064,6 +1098,179 @@ def compute_turnover(hldg, index="Date", columns="ISIN", values="w_rebase"):
     turnover = pd.Series(turnover_i, index=hh.index[1:])
 
     return turnover
+
+
+def compute_VaR(returns, formula="Parametric Normal", conf_int=.95, period_int=None,
+                ewma_discount_f=.94, series=False, removeNA=True):
+    """
+    https://github.com/BSIC/VaR/blob/master/VaR.py
+    this function can calculate both single value VaR and series of VaR values through time
+    supported formulas: Parametric Normal, Parametric EWMA, Historical Simulation, Filtered Historical Simulation
+    """
+    # returns must be pd.Series
+    if isinstance(returns, pd.DataFrame):
+        # prendi solo la prima colonna
+        returns = returns[returns.columns[0]]
+
+    # removes NAs from the series
+    if removeNA:
+        returns = returns[pd.notnull(returns)]
+
+    if series and period_int is None:
+        # default value
+        period_int = 100
+    elif period_int is None:
+        period_int = len(returns)
+
+    #########################
+    # Parametric Normal VaR #
+    #########################
+    if formula in ["Parametric Normal", "Normal"]:
+        if not series:
+            data = returns[-period_int:]
+            stdev = np.std(data)
+            VaR = stdev * norm.ppf(conf_int)
+        else:
+            VaR = pd.Series(index=returns.index, name="ParVaR")
+            for i in range(len(returns) - period_int):
+                if i == 0:
+                    data = returns[-period_int:]
+                else:
+                    data = returns[-period_int - i:-i]
+                stdev = np.std(data)
+                VaR[-i - 1] = stdev * norm.ppf(conf_int)
+
+    #######################
+    # EWMA Parametric VaR #
+    #######################
+    if formula in ["Parametric EWMA", "EWMA"]:
+        # define exponentially smoothed weights components
+        dof = np.empty([period_int, ])       # degree of freedom
+        weights = np.empty([period_int, ])
+        dof[0] = 1.
+        dof[1] = ewma_discount_f
+        Range = range(period_int)
+        for i in range(2, period_int):
+            dof[i] = dof[1] ** Range[i]
+        for i in range(period_int):
+            weights[i] = dof[i] / sum(dof)
+
+        if not series:
+            sqrd_data = returns[-period_int:] ** 2
+            ewma_stdev = math.sqrt(sum(weights * sqrd_data))
+            VaR = ewma_stdev * norm.ppf(conf_int)
+        else:
+            VaR = pd.Series(index=returns.index, name="EWMAVaR")
+            sqrd_returns = returns ** 2
+            # this loop repeas the VaR calculation iterated for every xxx period interval
+            for i in range(len(returns) - period_int):
+                # this is needed as, supposing x is a number, referencing a pd.series as a[x, 0] is a mistake.
+                # correct is a[x:]
+                if i == 0:
+                    sqrd_data = sqrd_returns[-period_int:]
+                else:
+                    sqrd_data = sqrd_returns[-period_int - i:-i]
+                ewma_stdev = math.sqrt(sum(weights * sqrd_data))
+                # pd.series work differently for singular entries. so if a[x:] gets up to the last number, a[] does not
+                # work. so a[-1] will get the equivalent to the last of a[x:-1]
+                VaR[-i - 1] = ewma_stdev * norm.ppf(conf_int)
+
+    #########################
+    # Historical Simulation #
+    #########################
+    if formula in ["Historical Simulation", "Historical"]:
+        if not series:
+            data = returns[-period_int:]
+            VaR = -np.percentile(data, 1 - conf_int)
+        else:
+            VaR = pd.Series(index=returns.index, name="HSVaR")
+            for i in range(len(returns) - period_int):
+                if i == 0:
+                    data = returns[-period_int:]
+                else:
+                    data = returns[-period_int - i:-i]
+                VaR[-i - 1] = -np.percentile(data, 1 - conf_int)
+
+    ##################################
+    # Filtered Historical Simulation #
+    ##################################
+    if formula in ["Filtered Historical Simulation", "Filtered", "FHS"]:
+        # defining exponentially smoothed weights components
+        dof = np.empty([period_int, ])
+        weights = np.empty([period_int, ])
+        dof[0] = 1.
+        dof[1] = ewma_discount_f
+        Range = range(period_int)
+        for i in range(2, period_int):
+            dof[i] = dof[1] ** Range[i]
+        for i in range(period_int):
+            weights[i] = dof[i] / sum(dof)
+
+        VaR = pd.Series(index=returns.index, name="FHSVaR")
+        ewma_stdev = np.empty([len(returns) - period_int, ])
+        stndr_data = pd.Series(index=returns.index)
+
+        # for efficiency, dont do it in the loop
+        sqrd_returns = returns ** 2
+
+        # computations here happen in different times, bc we first need all the ewma_stdev
+        # first get the stdev according to the ewma
+        for i in range(len(returns) - period_int):
+            if i == 0:
+                sqrd_data = sqrd_returns[-period_int:]
+            else:
+                sqrd_data = sqrd_returns[-period_int - i:-i]
+            ewma_stdev[-i - 1] = math.sqrt(sum(weights * sqrd_data))
+
+        # get the standardized data by dividing for the ewma_stdev
+        # length is here -1 bc we standardize by the ewma_stdev of the previous period
+        # hence also ewma_stdev is [-i - 2] instead of [-i - 1]
+        for i in range(len(returns) - period_int - 1):
+            stndr_data[-i - 1] = returns[-i - 1] / ewma_stdev[-i - 2]
+        # NON si ottiene lo stesso numero di osservazioni come negli altri casi, perché ewma_stdev è NA per le prime
+        # (period_int - 1) osservazioni
+        stndr_data = stndr_data[pd.notnull(stndr_data)]
+        # get the percentile and unfilter back the data
+        for i in range(len(stndr_data) - period_int):
+            if i == 0:
+                stndr_data2 = stndr_data[-period_int:]
+            else:
+                stndr_data2 = stndr_data[-period_int - i:-i]
+
+                stndr_data_pct = np.percentile(stndr_data2, 1 - conf_int)
+
+                # unfilter back with the current stdev
+                VaR[-i - 1] = -(stndr_data_pct * ewma_stdev[-i - 1])
+
+        # for FHS the single take of VaR does not work bc we need to standardize for the preceeding stdev
+        # hence it is always necessary to calculate the whole series and take the last value
+        if series:
+            VaR = VaR
+        else:
+            VaR = VaR[-1]
+
+    return VaR
+
+
+def compare_VaR(returns, conf_int=.95, period_int=100, ewma_discount_f=.94):
+    """
+    https://github.com/BSIC/VaR/blob/master/VaR.py
+    """
+    # call the single VaR series
+    VaRPN = compute_VaR(returns, formula="Parametric Normal", conf_int=conf_int, period_int=period_int,
+                        ewma_discount_f=ewma_discount_f, series=True, removeNA=True)
+    VaREWMA = compute_VaR(returns, formula="Parametric EWMA", conf_int=conf_int, period_int=period_int,
+                          ewma_discount_f=ewma_discount_f, series=True, removeNA=True)
+    VaRHS = compute_VaR(returns, formula="Historical Simulation", conf_int=conf_int, period_int=period_int,
+                        ewma_discount_f=ewma_discount_f, series=True, removeNA=True)
+    VaRFHS = compute_VaR(returns, formula="Filtered Historical Simulation", conf_int=conf_int, period_int=period_int,
+                         ewma_discount_f=ewma_discount_f, series=True, removeNA=True)
+
+    # concat the different VaR series in the same dataframe and plot it
+    AllVaR = pd.concat([VaRPN, VaREWMA, VaRHS, VaRFHS], axis=1)
+    AllVaR.plot(lw=1)
+
+    return AllVaR
 
 
 # PRINT NICE STATISTICS
@@ -1311,7 +1518,7 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
 
 
 def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="weight", id_col="ISIN",
-                        equally_weighted=True, rebase=1., use_scipy=True):
+                        equally_weighted=True, rebase=1., final_w=1., use_scipy=True):
     """
     Replica di un index/ETF/ptf utilizzando la metodologia di Lux:
         - aggregazione per le colonne indicate in groupby
@@ -1329,6 +1536,7 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
     :param id_col: str, nome della colonna contenete ISIN, ticker, CUSIP (identifier degli strumenti)
     :param equally_weighted: boolean. if False, distribuisci i pesi in base al peso iniziale in hldg
     :param rebase: int/float or None. if None, do not rebase. if not None, rebase to value of rebase
+    :param final_w: int/float or None. if None, do not rebase final weights. if not None, rebase final weights to final_w
     :param use_scipy: boolean, which method to use to find N_fittizio.
         if True uses scipy.optimize.root_scalar()
         if False uses function implemented in MySQL (while loop)
@@ -1347,7 +1555,11 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
 
     if rebase is not None:
         if not isinstance(rebase, (int, float)):
-            raise TypeError("groupby_coverage must be None or int/float")
+            raise TypeError("rebase must be None or int/float")
+
+    if final_w is not None:
+        if not isinstance(final_w, (int, float)):
+            raise TypeError("final_w must be None or int/float")
 
     # columns required for computing replica portfolio
     required_cols = [id_col, w_col, *groupby]
@@ -1356,7 +1568,7 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
 
     if rebase is not None:
         # rebase weights
-        hldg[w_col] = hldg[w_col] / (hldg[w_col].sum() * rebase)
+        hldg[w_col] = hldg[w_col] / hldg[w_col].sum() * rebase
 
     if agg is None:
         # calcolare agg se non è fornito
@@ -1410,11 +1622,16 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
         # aggiungi colonna contente il peso di ogni combinazione groupby
         replica = replica.merge(agg[[*groupby, "w_stock"]], how="left", on=groupby)
         replica["w_replica"] = replica["w_stock"]
+        # replica["w_replica"] = replica["w_replica"] / sum(replica["w_replica"])
     else:
         # aggiungi il peso della combinazione groupby
         replica = replica.merge(agg[[*groupby, "w_groupby"]], how="left", on=groupby)
         replica["w_replica"] = \
             replica.groupby(groupby).apply(lambda x: x[w_col] / x[w_col].sum() * x["w_groupby"]).values
+
+    # ribasa peso replica a 1
+    if final_w is not None:
+        replica["w_replica"] = replica["w_replica"] / replica["w_replica"].sum() * final_w
 
     output_cols = [id_col, w_col, *groupby, "w_replica"]
     replica = replica[output_cols]
@@ -1481,13 +1698,14 @@ def redistribuite_weights_given_bounds(df, minw=0, maxw=1, w_col="Weight"):
     return df
 
 
-def compute_groupby_difference(hldg, bmk_hldg, groupby="GICS Sector", w_col="Weight"):
+def compute_groupby_difference(hldg, bmk_hldg, groupby="GICS Sector", w_col="Weight", w_col_bmk=None):
     """
     compute difference between aggregation of ptf vs index
     :param hldg: pd.DataFrame with portfolio composition [only one ptf per call]
     :param bmk_hldg: pd.DataFrame with benchmark composition
     :param groupby: list of keys to groupby
     :param w_col: str, weight colname
+    :param w_col_bmk: str or None. if None, w_col_bmk = w_col, otherwise use w_col_bmk for bmk_hldg and w_col for hldg
     # :param verbose: boolean, if True return tuples (diff, ptf_exp, bmk_exp)
     """
     if not isinstance(hldg, pd.DataFrame):
@@ -1500,17 +1718,23 @@ def compute_groupby_difference(hldg, bmk_hldg, groupby="GICS Sector", w_col="Wei
         groupby = [groupby]
     if not isinstance(w_col, str):
         raise TypeError("w_col must be str")
+    if w_col_bmk is None:
+        w_col_bmk = w_col
+    else:
+        if not isinstance(w_col_bmk, str):
+            raise TypeError("w_col_bmk must be str")
 
     # # columns to lowercase
     # hldg.columns = hldg.columns.map(lambda x: x.lower())
     # bmk_hldg.columns = bmk_hldg.columns.map(lambda x: x.lower())
     # groupby = list(map(lambda x: x.lower(), groupby))
 
-
     # group by `groupby` and compute allocation weights
-    fun_exposure = lambda x: x[w_col].sum()
-    ptf_exposure = hldg.groupby(groupby).apply(fun_exposure).reset_index(name="replica_exp")
-    bmk_exposure = bmk_hldg.groupby(groupby).apply(fun_exposure).reset_index(name="bmk_exp")
+    def fun_exposure(x, col):
+        return x[col].sum()
+    
+    ptf_exposure = hldg.groupby(groupby).apply(lambda x: fun_exposure(x, w_col)).reset_index(name="replica_exp")
+    bmk_exposure = bmk_hldg.groupby(groupby).apply(lambda x: fun_exposure(x, w_col_bmk)).reset_index(name="bmk_exp")
 
     diff = pd.merge(ptf_exposure, bmk_exposure, how="outer", on=groupby)
     diff = diff.fillna(0)

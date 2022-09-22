@@ -92,6 +92,21 @@ class Portfolio(object):
 
         return weights
 
+    def prep_weights(self, x, rebal_date=None):
+        """
+        ausiliar function, to prepare weights
+        :param x: list or np.ndarray
+        :return:
+        """
+        weights = pd.DataFrame(x).transpose()
+        weights.columns = self.prices.columns
+        if rebal_date is None:
+            weights.index = [self.prices.index[0]]
+        else:
+            weights.index = [rebal_date]
+
+        return weights
+
     def get_components_value_single_period(self, ret, v_init):
         """
         compute components values over time, in a single rebalancing window, given returns and initial values
