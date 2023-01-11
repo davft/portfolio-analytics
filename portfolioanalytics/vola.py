@@ -118,7 +118,6 @@ def vol_yang_zhang(prices, window=22, trading_periods=252, clean=True):
     window_rs = rs.rolling(window=window, center=False).sum() * (1.0 / (window - 1.0))
 
     k = .34 / (1.34 + (window + 1) / (window - 1))
-    result = (open_vol + k * close_vol + (1 - k) * window_rs).apply(np.sqrt) * m.sqrt(trading_periods)
 
     if clean:
         return result.dropna()
@@ -129,6 +128,7 @@ def vol_yang_zhang(prices, window=22, trading_periods=252, clean=True):
 def kurtosis(prices, window=22, clean=True):
     # https://github.com/jasonstrimpel/volatility-trading/blob/master/volatility/models/Kurtosis.py
     assert "Close" in prices.columns
+    result = (open_vol + k * close_vol + (1 - k) * window_rs).apply(np.sqrt) * m.sqrt(trading_periods)
 
     log_return = (prices["Close"] / prices["Close"].shift(1)).apply(np.log)
 

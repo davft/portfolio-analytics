@@ -43,3 +43,27 @@ def risk_parity(ts, lookback=12, risk_budget=.1, freq=None, returns=True, max_le
                 weights[weights.sum(axis=1) > max_leverage].apply(lambda x: x / sum(x) * max_leverage, axis=1)
 
     return weights
+
+
+def risk_premia(ts, benchmark, lookback=6, max_long=.04, max_short=-.04, freq=None):
+
+    assert isinstance(ts, (pd.Series, pd.DataFrame))
+
+    if freq is not None:
+        ts = pa.change_freq_ts(ts, freq)
+        benchmark = pa.change_freq_ts(benchmark, freq)
+
+    # calcola ritorni con lag lookback
+    ret = ts / ts.shift(lookback - 1) - 1
+    bmk_ret = benchmark / benchmark.shift(lookback - 1) - 1
+
+    # differenza tra i ritorni
+    diff = ret.subtract(bmk_ret, axis=0)
+
+    premia = pd.DataFrame(index=diff.index, columns=diff.columns)
+    # se differenza positiva, vai lungo, altrimenti vai short
+    premia[diff >= 0] = max_long
+    premia[diff < 0] = max_short
+
+    return premia
+

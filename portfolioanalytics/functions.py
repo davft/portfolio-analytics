@@ -1307,6 +1307,134 @@ def compare_VaR(returns, conf_int=.95, period_int=100, ewma_discount_f=.94):
     return AllVaR
 
 
+def ewstats(returns, decay=None, window=None):
+    """
+    Replica funzione ewstats di Matlab
+    https://it.mathworks.com/help/finance/ewstats.html?s_tid=doc_ta
+    :param returns:
+    :param decay:
+    :param window:
+    :return:
+    """
+
+    # EWSTATS Expected return and covariance from return time series.
+    #   Optional exponential weighting emphasizes more recent data.
+    #
+    #   [ExpReturn, ExpCovariance, NumEffObs] = ewstats(RetSeries, ...
+    #                                           DecayFactor, WindowLength)
+    #
+    #   Inputs:
+    #     RetSeries : NUMOBS by NASSETS matrix of equally spaced incremental
+    #     return observations.  The first row is the oldest observation, and the
+    #     last row is the most recent.
+    #
+    #     DecayFactor : Controls how much less each observation is weighted than its
+    #     successor.  The k'th observation back in time has weight DecayFactor^k.
+    #     DecayFactor must lie in the range: 0 < DecayFactor <= 1.
+    #     The default is DecayFactor = 1, which is the equally weighted linear
+    #     moving average Model (BIS).
+    #
+    #     WindowLength: The number of recent observations used in
+    #     the computation.  The default is all NUMOBS observations.
+    #
+    #   Outputs:
+    #     ExpReturn : 1 by NASSETS estimated expected returns.
+    #
+    #     ExpCovariance : NASSETS by NASSETS estimated covariance matrix.
+    #
+    #     NumEffObs: The number of effective observations is given by the formula:
+    #     NumEffObs = (1-DecayFactor^WindowLength)/(1-DecayFactor).  Smaller
+    #     DecayFactors or WindowLengths emphasize recent data more strongly, but
+    #     use less of the available data set.
+    #
+    #   The standard deviations of the asset return processes are given by:
+    #   STDVec = sqrt(diag(ECov)).  The correlation matrix is :
+    #   CorrMat = VarMat./( STDVec*STDVec' )
+    #
+    #   See also MEAN, COV, COV2CORR.
+
+    n_obs = len(returns)
+    n_assets = len(returns.columns)
+
+    # size the series and the window
+    if window is None:
+        window = n_obs
+
+    if decay is None:
+        decay = 1
+
+    if decay <= 0 or decay > 1:
+        raise ValueError("Must have 0 < decay factor <= 1")
+
+    if window > n_obs:
+        raise ValueError(f"Window Length {window} must be <= number of observations {n_obs}")
+
+    # ------------------------------------------------------------------------
+    # size the data to the window
+    returns = returns.iloc[n_obs - window:n_obs, :]
+
+    # Calculate decay coefficients
+    decay_powers = np.arange(window, 0, -1)
+    var_wgt = np.sqrt(decay) ** decay_powers
+    ret_wgt = (decay) ** decay_powers
+
+    n_eff = sum(ret_wgt)  # number of equivalent values in computation
+
+    pd_ret_wgt = pd.Series(ret_wgt, index=returns.index)
+    pd_var_wgt = pd.Series(var_wgt, index=returns.index)
+
+    # Compute the exponentially weighted mean return
+    ret_ewm = returns.multiply(pd_ret_wgt, axis=0)
+    # WtSeries <- matrix(rep(RetWts, times = NumSeries),
+    #                    nrow = length(RetWts), ncol = NumSeries) * RetSeries
+
+    Eret = ret_ewm.sum(axis=0) / n_eff
+
+    # Subtract the weighted mean from the original Series
+    centered_ret = returns.copy()
+    for col in returns.columns:
+        centered_ret[col] = returns[col] - Eret[col]
+    # CenteredSeries <- RetSeries - matrix(rep(ERet, each = WindowLength),
+    #                                      nrow = WindowLength, ncol = length(ERet))
+
+    # Compute the weighted variance
+    var_ewm = centered_ret.multiply(pd_var_wgt, axis=0)
+
+    Ecov = var_ewm.T.dot(var_ewm) / n_eff
+
+    return Eret, Ecov, n_eff
+
+
+def cov2corr(covar):
+    """
+    Replica la funzione cov2corr di Matlab
+    https://it.mathworks.com/help/finance/cov2corr.html
+    :param covar:
+    :return:
+    """
+    # version with for-cycles
+    # n_obs = len(covar)
+    # n_assets = len(covar.columns)
+    #
+    # sigma = pd.Series(index=covar.index, name="Expected Sigma")
+    # corr = pd.DataFrame(columns=covar.columns, index=covar.index)
+    #
+    # for i in range(n_obs):
+    #     sigma.iloc[i] = np.sqrt(covar.iloc[i, i])
+    # for i in range(n_obs):
+    #     for j in range(n_assets):
+    #         corr.iloc[i, j] = covar.iloc[i, j] / (sigma.iloc[i] * sigma.iloc[j])
+
+    # version with matrix computation
+    # https://github.com/CamDavidsonPilon/Python-Numerics/blob/master/utils/cov2corr.py
+    sigma = np.sqrt(np.diag(covar))
+    corr = (covar.T / sigma).T / sigma
+    sigma = pd.Series(sigma, index=covar.index, name="Expected Sigma")
+    corr = pd.DataFrame(corr, index=covar.index, columns=covar.columns)
+
+    return sigma, corr
+
+
 # PRINT NICE STATISTICS
 def print_stats(ts, line_length=50):
     """

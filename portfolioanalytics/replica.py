@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from scipy.optimize import root_scalar
+from math import ceil
 
 
 # REPLICA
@@ -198,7 +199,7 @@ def compute_replica_groupby(holdings, groupby=["country", "sector"], overall_cov
     return replica
 
 
-def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="weight", id_col="ISIN",
+def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, min_agg=0, w_col="weight", id_col="ISIN",
                         equally_weighted=True, rebase=1., final_w=1., use_scipy=True):
     """
     Replica di un index/ETF/ptf utilizzando la metodologia di Lux:
@@ -213,6 +214,8 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
     :param agg: None or pd.DataFrame, serve per ottenere una scomposizione su groupby CUSTOM
         - es/ per replica di TRVCI si parte da composizioni SPX, si aggrega per settore, e si aggiustano i pesi
             settoriali utilizzando il beta settoriale vs TRVCI. si calcola fuori dalla funzione e lo si da in input
+    :param min_agg: float. rimuovi tutte le aggregagazioni groupby che non raggiungono questo threshold.
+        min_agg = 0 non implica modifiche, min_agg > 0 rimuove celle
     :param w_col: str, nome della colonna contenente i pesi di ogni titolo nel ptf iniziale
     :param id_col: str, nome della colonna contenete ISIN, ticker, CUSIP (identifier degli strumenti)
     :param equally_weighted: boolean. if False, distribuisci i pesi in base al peso iniziale in hldg
@@ -251,6 +254,12 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
         # rebase weights
         hldg[w_col] = hldg[w_col] / hldg[w_col].sum() * rebase
 
+    # definisci la funzione per fare il round
+    if min_agg > 0:
+        local_round = lambda x, _: ceil(x)
+    else:
+        local_round = lambda x, n_decimal: round(x, n_decimal)
+
     if agg is None:
         # calcolare agg se non è fornito
         agg = hldg.groupby(groupby)[w_col].sum().reset_index(name="w_groupby")
@@ -258,27 +267,33 @@ def compute_lux_replica(hldg, N=100, groupby="GICS Sector", agg=None, w_col="wei
         if not {*groupby, "w_groupby"}.issubset(agg.columns):
             raise Exception(f"`agg` must have columns: {groupby}, w_groupby")
 
+    if min_agg > 0:
+        agg = agg[agg["w_groupby"] > min_agg]
+
     if use_scipy:
         # scipy.optimize.root_scalar()
         def find_N_fittizio(x, series, N):
-            return sum([round(x * y, 0) for y in series]) - N
+            return sum([local_round(x * y, 0) for y in series]) - N
 
         N_fittizio = root_scalar(find_N_fittizio, args=(agg["w_groupby"], N), bracket=[0, N + 50], x0=N).root
     else:
         # while-loop to find the minimum integer which gives at least N stocks
         N_fittizio = N
-        while sum([round(N_fittizio * x, 0) for x in agg["w_groupby"]]) < N:
+        while sum([local_round(N_fittizio * x, 0) for x in agg["w_groupby"]]) > N:
+            N_fittizio -= 10
+        while sum([local_round(N_fittizio * x, 0) for x in agg["w_groupby"]]) < N:
             N_fittizio += 1
 
     # calcola il numero di stock che vanno selezionate per ogni combinazione groupby
-    agg["n_stocks"] = [int(round(N_fittizio * x, 0)) for x in agg["w_groupby"]]
+    agg["n_stocks"] = [int(local_round(N_fittizio * x, 0)) for x in agg["w_groupby"]]
 
     # rimuovi le combinazioni con 0 stock
     agg = agg[agg["n_stocks"] != 0]
 
     # se c'è GOOGL US (US02079K3059) rimuovi GOOG US (US02079K1079)
-    if "US02079K3059" in hldg[id_col].values:
+    if "US02079K3059" in hldg[id_col].values or "GOOGL US" in hldg[id_col].values:
         hldg = hldg[hldg[id_col] != "US02079K1079"]
+        hldg = hldg[hldg[id_col] != "GOOG US"]
 
     # sort by groupby and weight, ascending order for groupby and descending for weight
     hldg = hldg.sort_values([*groupby, w_col], ascending=[*[True] * len(groupby), False])

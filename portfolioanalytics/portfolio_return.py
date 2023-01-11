@@ -162,7 +162,7 @@ class Portfolio(object):
             # potrebbe esserci stato l'update di max_leverage
             weights = self.check_weights(self.weights)
         else:
-            weights = self.check_weights(weights)
+            weights = self.check_weights(weights.copy())
             assert isinstance(weights, pd.DataFrame)
             self.weights = weights
 
